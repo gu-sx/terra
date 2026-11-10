@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Scope
 
@@ -64,7 +64,7 @@ The scanner, `crates/terra-storage/src/scan/`, keeps the library in step with th
 
 `LocalLibrary::list_roots()` returns the roots ordered by path.
 
-**Proposed: removing a root removes its tracks.** `LocalLibrary::remove_root(path)` deletes the root, every track whose file is under it, and so those tracks' playlist entries and plays (`ON DELETE CASCADE`), in one transaction. The alternative, keeping the tracks as missing, would leave files that no root can find again. It returns whether `path` was a root, compared after resolving it as `add_root` does, or as given when that fails, such as for a folder that no longer exists. The responsible engineer decides.
+**Removing a root removes its tracks.** `LocalLibrary::remove_root(path)` deletes the root, every track whose file is under it, and so those tracks' playlist entries and plays (`ON DELETE CASCADE`), in one transaction. The alternative, keeping the tracks as missing, would leave files that no root can find again. It returns whether `path` was a root, compared after resolving it as `add_root` does, or as given when that fails, such as for a folder that no longer exists.
 
 ### The algorithm
 
