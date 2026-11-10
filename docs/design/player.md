@@ -74,5 +74,5 @@ The deck plays in the output's format: the device's channel count and sample rat
 
 ## Known limits
 
-- AAC in M4A is not gapless and its timeline is 1024 samples early, because Symphonia 0.5 ignores the MP4 edit list (the record's "AAC in M4A" consequence). Its gapless test is skipped until #23 fixes it.
+- Symphonia 0.5 ignores the MP4 edit list (the record's "AAC in M4A" consequence), so AAC and ALAC in M4A play through a source of the crate's own that applies it (#23): it plays only the samples the edit presents and seeks by timestamp, which makes AAC gapless and its timeline exact. It applies one edit at normal rate, after any empty edits; a file with several edits, or none, plays the whole media. It does not read an `iTunSMPB` tag, so an AAC file that carries one instead of an edit list keeps its priming and padding.
 - A seek or a skip while paused takes effect when playback resumes.
