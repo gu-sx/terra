@@ -153,3 +153,19 @@ async fn accents_on_latin_letters_are_ignored() {
     }
     assert_eq!(found(&library, "ártist c").await.0, names(&["Artist C"]));
 }
+
+#[tokio::test]
+async fn any_combining_mark_is_ignored() {
+    let dir = TempDir::new().unwrap();
+    let library = sample_library(dir.path()).await;
+
+    // The tokenizer reads the overline (U+0305) as a separator, so it only
+    // matches because the query and the index are folded before it sees them.
+    for query in ["cafe", "café", "ca\u{301}fe", "ca\u{305}fe"] {
+        assert_eq!(
+            found(&library, query).await.0,
+            names(&["Café Ensemble"]),
+            "{query:?}"
+        );
+    }
+}

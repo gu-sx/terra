@@ -2333,6 +2333,7 @@ dependencies = [
 name = "terra-storage"
 version = "0.1.0"
 dependencies = [
+ "icu_normalizer",
  "icu_properties",
  "sqlx",
  "tempfile",
