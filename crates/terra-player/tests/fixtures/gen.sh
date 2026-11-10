@@ -26,9 +26,14 @@ $ff -i "$tmp/sine.wav" -af "atrim=start_sample=$split,asetpts=PTS-STARTPTS" -c:a
 $ff -f lavfi -i "aevalsrc=if(between(n\\,3000\\,50999)\\,0.5*sin(2*PI*1000*t)\\,0):s=48000:d=1.125" \
   -c:a pcm_s16le "$tmp/marker.wav"
 
+# AAC is encoded at 320 kbit/s, not the spike's 192: FFmpeg's encoder starts
+# each half with an onset error that depends on the bitrate, and the join
+# residual measures it as well as the engine. FFmpeg's own decoder of b.aac.m4a
+# is 0.098 off the tone at 128k, 0.125 at 192k, 0.111 at 256k and 0.043 at 320k,
+# against the record's bound of 0.1 (#23).
 encode() { # <name> <title>
   for codec in "libmp3lame -b:a 192k mp3" "flac flac" "libopus -b:a 128k opus" \
-      "aac -b:a 192k aac.m4a" "alac alac.m4a"; do
+      "aac -b:a 320k aac.m4a" "alac alac.m4a"; do
     ext=${codec##* }
     $ff -i "$tmp/$1.wav" -metadata title="$2" -metadata artist="Artist A" \
       -metadata album="Album A" -c:a ${codec% *} "$1.$ext"
