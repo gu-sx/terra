@@ -631,9 +631,12 @@ pub async fn search_without_terms_finds_nothing<B: LibraryBackend>(backend: B) {
 pub async fn list_artists_orders_by_sort_name<B: LibraryBackend>(backend: B) {
     let artists = backend.list_artists().await.unwrap();
     let names: Vec<&str> = artists.iter().map(|artist| artist.name.as_str()).collect();
+    // "The Aardvarks" sorts as "Aardvarks, The": first by sort name, but
+    // after "Artist E" by name and last by identifier.
     assert_eq!(
         names,
         [
+            "The Aardvarks",
             "Artist A",
             "Artist B",
             "Artist C",

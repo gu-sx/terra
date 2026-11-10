@@ -12,6 +12,10 @@
 //!
 //! "Late Shift" has the album artist "Various Artists". The tracks were
 //! added a day apart, in the order of the table.
+//!
+//! One more artist, "The Aardvarks" with the sort name "Aardvarks, The", has
+//! no tracks. It has the highest identifier, so ordering artists by sort
+//! name, by name or by identifier gives three different orders.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -37,20 +41,21 @@ const DAY: u64 = 24 * 60 * 60;
 /// Builds the sample library.
 pub fn library() -> SampleLibrary {
     let artist_names = [
-        "Artist A",
-        "Artist B",
-        "Artist C",
-        "Artist D",
-        "Artist E",
-        "Various Artists",
+        ("Artist A", "Artist A"),
+        ("Artist B", "Artist B"),
+        ("Artist C", "Artist C"),
+        ("Artist D", "Artist D"),
+        ("Artist E", "Artist E"),
+        ("Various Artists", "Various Artists"),
+        ("The Aardvarks", "Aardvarks, The"),
     ];
     let artists: Vec<Artist> = artist_names
         .iter()
         .zip(1..)
-        .map(|(name, id)| Artist {
+        .map(|((name, sort_name), id)| Artist {
             id: ArtistId::new(id),
             name: (*name).to_owned(),
-            sort_name: (*name).to_owned(),
+            sort_name: (*sort_name).to_owned(),
         })
         .collect();
     let artist = |id: i64| {
