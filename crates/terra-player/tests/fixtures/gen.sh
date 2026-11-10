@@ -37,3 +37,13 @@ encode() { # <name> <title>
 encode a "Tone A"
 encode b "Tone B"
 encode marker "Marker"
+
+# Seeking: 1 s of seeded pink noise, AAC in M4A only, so that a window after a
+# seek matches exactly one position in the file (a sine repeats every 48
+# samples). The seek test locates it in the file's own decode. Perceptual
+# noise substitution is off: its bands decode from a random generator, so no
+# two decodes would match.
+$ff -f lavfi -i "anoisesrc=color=pink:seed=23:amplitude=0.5:sample_rate=48000:duration=1" \
+  -c:a pcm_s16le "$tmp/noise.wav"
+$ff -i "$tmp/noise.wav" -metadata title="Noise" -metadata artist="Artist A" \
+  -metadata album="Album A" -c:a aac -b:a 128k -aac_pns 0 noise.aac.m4a
