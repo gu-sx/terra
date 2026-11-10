@@ -4,6 +4,7 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::app::{Action, App};
+use super::playlist::Modal;
 
 /// A key and the modifiers held with it. Shift is not part of a character
 /// key: `G` is `Char('G')` without modifiers.
@@ -78,18 +79,31 @@ pub enum Context {
     /// Typing a search query. Characters without a binding go into the
     /// query.
     Search,
+    /// Typing a playlist's name, or filtering the playlist picker.
+    /// Characters without a binding go into the text.
+    Prompt,
+    /// Answering a yes or no question.
+    Confirm,
     /// The help overlay is open.
     Help,
 }
 
 impl Context {
     /// The contexts in the order the help overlay shows them.
-    pub const ALL: [Self; 3] = [Self::Browse, Self::Search, Self::Help];
+    pub const ALL: [Self; 5] = [
+        Self::Browse,
+        Self::Search,
+        Self::Prompt,
+        Self::Confirm,
+        Self::Help,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Browse => "BROWSE",
             Self::Search => "SEARCH",
+            Self::Prompt => "PROMPT",
+            Self::Confirm => "CONFIRM",
             Self::Help => "HELP",
         }
     }
@@ -98,6 +112,11 @@ impl Context {
     pub fn of(app: &App) -> Self {
         if app.help {
             Self::Help
+        } else if let Some(modal) = &app.modal {
+            match modal {
+                Modal::Name { .. } | Modal::Picker(_) => Self::Prompt,
+                Modal::Delete(_) => Self::Confirm,
+            }
         } else if app.editing_search().is_some() {
             Self::Search
         } else {
@@ -232,6 +251,55 @@ pub const KEYMAP: &[Binding] = &[
     ),
     bind(
         Context::Browse,
+        &[Key::char('a')],
+        Action::AddToPlaylist,
+        "Add to a playlist",
+        Some("add"),
+    ),
+    bind(
+        Context::Browse,
+        &[Key::char('n')],
+        Action::NewPlaylist,
+        "New playlist",
+        None,
+    ),
+    bind(
+        Context::Browse,
+        &[Key::char('r')],
+        Action::RenamePlaylist,
+        "Rename the playlist",
+        None,
+    ),
+    bind(
+        Context::Browse,
+        &[Key::char('D')],
+        Action::DeletePlaylist,
+        "Delete the playlist",
+        None,
+    ),
+    bind(
+        Context::Browse,
+        &[Key::char('x')],
+        Action::RemoveEntry,
+        "Remove the entry",
+        None,
+    ),
+    bind(
+        Context::Browse,
+        &[Key::char('J')],
+        Action::MoveEntryDown,
+        "Move the entry down",
+        None,
+    ),
+    bind(
+        Context::Browse,
+        &[Key::char('K')],
+        Action::MoveEntryUp,
+        "Move the entry up",
+        None,
+    ),
+    bind(
+        Context::Browse,
         &[Key::char('?')],
         Action::ToggleHelp,
         "Help",
@@ -287,6 +355,69 @@ pub const KEYMAP: &[Binding] = &[
         None,
     ),
     bind(
+        Context::Prompt,
+        &[Key::plain(KeyCode::Enter)],
+        Action::PromptConfirm,
+        "Accept",
+        Some("ok"),
+    ),
+    bind(
+        Context::Prompt,
+        &[Key::plain(KeyCode::Esc)],
+        Action::PromptCancel,
+        "Cancel",
+        Some("cancel"),
+    ),
+    bind(
+        Context::Prompt,
+        &[Key::plain(KeyCode::Backspace)],
+        Action::PromptDeleteChar,
+        "Delete a character",
+        None,
+    ),
+    bind(
+        Context::Prompt,
+        &[Key::plain(KeyCode::Down)],
+        Action::MoveDown,
+        "Move down the picker",
+        None,
+    ),
+    bind(
+        Context::Prompt,
+        &[Key::plain(KeyCode::Up)],
+        Action::MoveUp,
+        "Move up the picker",
+        None,
+    ),
+    bind(
+        Context::Prompt,
+        &[Key::ctrl('c')],
+        Action::Quit,
+        "Quit",
+        None,
+    ),
+    bind(
+        Context::Confirm,
+        &[Key::char('y')],
+        Action::PromptConfirm,
+        "Yes",
+        Some("yes"),
+    ),
+    bind(
+        Context::Confirm,
+        &[Key::char('n'), Key::plain(KeyCode::Esc)],
+        Action::PromptCancel,
+        "No",
+        Some("no"),
+    ),
+    bind(
+        Context::Confirm,
+        &[Key::ctrl('c')],
+        Action::Quit,
+        "Quit",
+        None,
+    ),
+    bind(
         Context::Help,
         &[Key::char('?'), Key::plain(KeyCode::Esc), Key::char('q')],
         Action::ToggleHelp,
@@ -301,10 +432,13 @@ pub fn action_for_key(context: Context, key: Key) -> Option<Action> {
         .iter()
         .find(|binding| binding.context == context && binding.keys.contains(&key))
         .map(|binding| binding.action);
-    match (bound, key.code) {
-        (Some(action), _) => Some(action),
-        (None, KeyCode::Char(c)) if context == Context::Search && key.modifiers.is_empty() => {
+    match (bound, key.code, context) {
+        (Some(action), _, _) => Some(action),
+        (None, KeyCode::Char(c), Context::Search) if key.modifiers.is_empty() => {
             Some(Action::SearchInput(c))
+        }
+        (None, KeyCode::Char(c), Context::Prompt) if key.modifiers.is_empty() => {
+            Some(Action::PromptInput(c))
         }
         _ => None,
     }
