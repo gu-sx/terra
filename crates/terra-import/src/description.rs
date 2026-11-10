@@ -111,7 +111,7 @@ fn find_stamps(line: &str) -> Vec<Stamp> {
             at += 1;
             continue;
         }
-        if let Some(stamp) = stamp_at(bytes, at) {
+        if let Some(stamp) = stamp_at(line, at) {
             stamps.push(stamp);
             at = stamp.to;
             continue;
@@ -125,10 +125,15 @@ fn find_stamps(line: &str) -> Vec<Stamp> {
 }
 
 /// Parses a timestamp token that starts at `from`, the first digit of a run.
-fn stamp_at(bytes: &[u8], from: usize) -> Option<Stamp> {
-    if from > 0 && (bytes[from - 1].is_ascii_alphanumeric() || bytes[from - 1] == b':') {
+fn stamp_at(line: &str, from: usize) -> Option<Stamp> {
+    if line[..from]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_alphanumeric() || c == ':')
+    {
         return None;
     }
+    let bytes = line.as_bytes();
     let (first, mut to) = number(bytes, from, 1..=2)?;
     if bytes.get(to) != Some(&b':') {
         return None;
@@ -149,7 +154,7 @@ fn stamp_at(bytes: &[u8], from: usize) -> Option<Stamp> {
             }
             first * 60 + second
         };
-    if !ends_token(bytes, to) {
+    if !ends_token(line, to) {
         return None;
     }
     Some(Stamp {
@@ -176,13 +181,14 @@ fn number(bytes: &[u8], from: usize, len: std::ops::RangeInclusive<usize>) -> Op
     Some((value, from + digits))
 }
 
-/// Whether a token may end before index `at`: the next byte is not a letter or
-/// digit, nor a `:` or `.` followed by a digit.
-fn ends_token(bytes: &[u8], at: usize) -> bool {
-    match bytes.get(at) {
+/// Whether a token may end before index `at`: the next character is not a
+/// letter or digit, in any script, nor a `:` or `.` followed by a digit.
+fn ends_token(line: &str, at: usize) -> bool {
+    let mut rest = line[at..].chars();
+    match rest.next() {
         None => true,
-        Some(byte) if byte.is_ascii_alphanumeric() => false,
-        Some(b':' | b'.') => !bytes.get(at + 1).is_some_and(u8::is_ascii_digit),
+        Some(c) if c.is_alphanumeric() => false,
+        Some(':' | '.') => !rest.next().is_some_and(|c| c.is_ascii_digit()),
         Some(_) => true,
     }
 }

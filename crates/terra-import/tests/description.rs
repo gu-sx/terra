@@ -269,6 +269,10 @@ fn ignored_text() {
             "a0:00 Artist\n0:00am Artist\n0:00.5 Artist\n0:00:0 Artist",
         ),
         (
+            "glued to letters in other scripts",
+            "Artist A - Café1:23\n1:23é Artist B\nArtist C - 夜1:23",
+        ),
+        (
             "unmatched brackets",
             "[00:00) Artist A - One\nArtist B - Two (01:00]",
         ),
