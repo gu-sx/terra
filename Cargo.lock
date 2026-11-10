@@ -2428,9 +2428,12 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "crossterm",
+ "etcetera",
  "futures-util",
  "ratatui",
+ "tempfile",
  "terra-core",
+ "terra-storage",
  "tokio",
 ]
 
