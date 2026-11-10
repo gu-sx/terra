@@ -4,6 +4,7 @@ mod contract;
 mod lifecycle;
 mod read;
 mod records;
+mod scan;
 mod search;
 
 use std::path::Path;

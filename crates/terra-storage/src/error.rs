@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use sqlx::migrate::MigrateError;
 use terra_core::TrackId;
 
-/// The error [`LocalLibrary`](crate::LocalLibrary)'s lifecycle methods
-/// return: creating, migrating and opening a library.
+/// The error [`LocalLibrary`](crate::LocalLibrary)'s own methods return:
+/// creating, migrating and opening a library, managing its roots and
+/// scanning them.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -28,7 +29,18 @@ pub enum Error {
         /// The migration's version.
         version: i64,
     },
-    /// Reading or writing the library's directory failed.
+    /// [`add_root`](crate::LocalLibrary::add_root) was given a folder that
+    /// is a library root already, or is inside one or contains one.
+    RootOverlaps {
+        /// The folder to add, resolved.
+        path: PathBuf,
+        /// The root it overlaps.
+        existing: PathBuf,
+    },
+    /// The library stores paths as text, and this one is not valid UTF-8.
+    NonUtf8Path(PathBuf),
+    /// Reading or writing the library's directory, or a folder to add as a
+    /// root, failed.
     Io(io::Error),
     /// The database failed.
     Database(Box<dyn error::Error + Send + Sync + 'static>),
@@ -47,7 +59,16 @@ impl fmt::Display for Error {
                 f,
                 "the library's migration {version} differs from this version's or did not finish"
             ),
-            Self::Io(_) => f.write_str("reading the library's directory failed"),
+            Self::RootOverlaps { path, existing } => write!(
+                f,
+                "{} overlaps the library root {}",
+                path.display(),
+                existing.display()
+            ),
+            Self::NonUtf8Path(path) => {
+                write!(f, "the path {} is not valid UTF-8", path.display())
+            }
+            Self::Io(_) => f.write_str("reading or writing a directory failed"),
             Self::Database(_) => f.write_str("the library database failed"),
         }
     }

@@ -1,6 +1,7 @@
-//! Writing artists, albums and tracks.
+//! Writing library roots, artists, albums and tracks.
 //!
-//! These helpers are the only code that inserts library records. Each takes
+//! These helpers are the only code that inserts, changes or deletes library
+//! records. Each takes
 //! a connection, so the caller decides the transaction: a scan writes each
 //! file, its track and its search rows in one. The tests seed their
 //! libraries with them.
@@ -219,4 +220,182 @@ pub(crate) async fn delete_track(conn: &mut SqliteConnection, id: TrackId) -> sq
         > 0;
     fts::sync_track(conn, id).await?;
     Ok(deleted)
+}
+
+/// Rewrites a track's fields and its file's, clears the file's
+/// `missing_since`, and reindexes the track. The track keeps its identifier
+/// and `added_at` (`track.added_at` is ignored); `updated_at` becomes
+/// `updated_at`. An artist or album the track no longer uses is deleted when
+/// nothing else uses it either.
+pub(crate) async fn update_track(
+    conn: &mut SqliteConnection,
+    id: TrackId,
+    track: &NewTrack<'_>,
+    updated_at: SystemTime,
+) -> sqlx::Result<()> {
+    let (old_artist, old_album): (i64, Option<i64>) =
+        sqlx::query_as("SELECT artist_id, album_id FROM track WHERE id = ?1")
+            .bind(id.get())
+            .fetch_one(&mut *conn)
+            .await?;
+    sqlx::query(
+        "UPDATE track
+         SET title = ?2, artist_id = ?3, album_id = ?4, disc_no = ?5, track_no = ?6,
+             duration_ms = ?7, updated_at = ?8
+         WHERE id = ?1",
+    )
+    .bind(id.get())
+    .bind(track.title)
+    .bind(track.artist.get())
+    .bind(track.album.map(AlbumId::get))
+    .bind(track.disc_no)
+    .bind(track.track_no)
+    .bind(integer(
+        track.duration.as_millis(),
+        "duration in milliseconds",
+    )?)
+    .bind(nanos(updated_at)?)
+    .execute(&mut *conn)
+    .await?;
+
+    let file = &track.file;
+    sqlx::query(
+        "UPDATE media_file
+         SET root_id = ?2, rel_path = ?3, size = ?4, mtime_ns = ?5, content_hash = ?6,
+             codec = ?7, lossless = ?8, sample_rate = ?9, channels = ?10, bitrate = ?11,
+             has_embedded_art = ?12, missing_since = NULL
+         WHERE track_id = ?1",
+    )
+    .bind(id.get())
+    .bind(file.root.0)
+    .bind(file.rel_path)
+    .bind(integer(file.size, "file size")?)
+    .bind(nanos(file.mtime)?)
+    .bind(file.content_hash)
+    .bind(&file.format.codec)
+    .bind(file.format.lossless)
+    .bind(file.format.sample_rate)
+    .bind(file.format.channels)
+    .bind(file.format.bitrate)
+    .bind(file.has_embedded_art)
+    .execute(&mut *conn)
+    .await?;
+
+    fts::sync_track(conn, id).await?;
+    let old_album = old_album.map(AlbumId::new);
+    if old_album != track.album {
+        delete_unused_album(conn, old_album).await?;
+    }
+    if old_artist != track.artist.get() {
+        delete_unused_artist(conn, ArtistId::new(old_artist)).await?;
+    }
+    Ok(())
+}
+
+/// Sets `missing_since` on a file that does not have it yet. Returns whether
+/// it changed.
+pub(crate) async fn mark_missing(
+    conn: &mut SqliteConnection,
+    file_id: i64,
+    since: SystemTime,
+) -> sqlx::Result<bool> {
+    let changed = sqlx::query(
+        "UPDATE media_file SET missing_since = ?2 WHERE id = ?1 AND missing_since IS NULL",
+    )
+    .bind(file_id)
+    .bind(nanos(since)?)
+    .execute(conn)
+    .await?
+    .rows_affected();
+    Ok(changed > 0)
+}
+
+/// Clears `missing_since` on a file.
+pub(crate) async fn clear_missing(conn: &mut SqliteConnection, file_id: i64) -> sqlx::Result<()> {
+    sqlx::query("UPDATE media_file SET missing_since = NULL WHERE id = ?1")
+        .bind(file_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Deletes a library root with its files and their tracks (and so their
+/// playlist entries and plays), and the artists and albums nothing uses any
+/// more. Returns whether the root existed.
+pub(crate) async fn delete_root(conn: &mut SqliteConnection, root: RootId) -> sqlx::Result<bool> {
+    let tracks: Vec<(i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT t.id, t.artist_id, t.album_id
+         FROM media_file f JOIN track t ON t.id = f.track_id
+         WHERE f.root_id = ?1
+         ORDER BY t.id",
+    )
+    .bind(root.0)
+    .fetch_all(&mut *conn)
+    .await?;
+    for &(track, _, _) in &tracks {
+        delete_track(conn, TrackId::new(track)).await?;
+    }
+    let mut albums: Vec<i64> = tracks.iter().filter_map(|&(_, _, album)| album).collect();
+    albums.sort_unstable();
+    albums.dedup();
+    for album in albums {
+        delete_unused_album(conn, Some(AlbumId::new(album))).await?;
+    }
+    let mut artists: Vec<i64> = tracks.iter().map(|&(_, artist, _)| artist).collect();
+    artists.sort_unstable();
+    artists.dedup();
+    for artist in artists {
+        delete_unused_artist(conn, ArtistId::new(artist)).await?;
+    }
+    let deleted = sqlx::query("DELETE FROM library_root WHERE id = ?1")
+        .bind(root.0)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    Ok(deleted > 0)
+}
+
+/// Deletes an album that no track is on, then its album artist if nothing
+/// uses that either.
+async fn delete_unused_album(
+    conn: &mut SqliteConnection,
+    album: Option<AlbumId>,
+) -> sqlx::Result<()> {
+    let Some(album) = album else {
+        return Ok(());
+    };
+    let deleted: Option<Option<i64>> = sqlx::query_scalar(
+        "DELETE FROM album
+         WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM track WHERE album_id = ?1)
+         RETURNING album_artist_id",
+    )
+    .bind(album.get())
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(album_artist) = deleted else {
+        return Ok(());
+    };
+    fts::sync_album(conn, album).await?;
+    if let Some(artist) = album_artist {
+        delete_unused_artist(conn, ArtistId::new(artist)).await?;
+    }
+    Ok(())
+}
+
+/// Deletes an artist that no track or album uses.
+async fn delete_unused_artist(conn: &mut SqliteConnection, artist: ArtistId) -> sqlx::Result<()> {
+    let deleted = sqlx::query(
+        "DELETE FROM artist
+         WHERE id = ?1
+           AND NOT EXISTS (SELECT 1 FROM track WHERE artist_id = ?1)
+           AND NOT EXISTS (SELECT 1 FROM album WHERE album_artist_id = ?1)",
+    )
+    .bind(artist.get())
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if deleted > 0 {
+        fts::sync_artist(conn, artist).await?;
+    }
+    Ok(())
 }
