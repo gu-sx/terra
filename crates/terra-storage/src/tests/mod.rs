@@ -1,7 +1,9 @@
 //! The crate's tests, and the sample library they seed.
 
 mod contract;
+mod history;
 mod lifecycle;
+mod playlists;
 mod read;
 mod records;
 mod search;

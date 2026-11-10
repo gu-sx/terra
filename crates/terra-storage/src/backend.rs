@@ -11,23 +11,38 @@ use terra_core::{
 };
 
 use crate::error::MissingFile;
-use crate::fts;
 use crate::library::LocalLibrary;
 use crate::time::from_nanos;
+use crate::{fts, history, playlist};
 
 // The queries below spell out `COLLATE unicode_nocase`, the collation
 // `library::NOCASE` names, because `concat!` takes only literals.
 
-/// The columns of a [`TrackRow`], from `track t` and its joins.
+/// The columns of a [`TrackRow`], from [`track_tables!`].
+macro_rules! track_columns {
+    () => {
+        " t.id, t.title, t.artist_id, ar.name AS artist_name, t.album_id,
+          al.title AS album_title, t.disc_no, t.track_no, t.duration_ms, t.added_at,
+          f.codec, f.lossless, f.sample_rate, f.channels, f.bitrate "
+    };
+}
+
+/// `track t` and the tables a [`TrackRow`] joins to it. A query may join
+/// more after them.
+macro_rules! track_tables {
+    () => {
+        " FROM track t
+          JOIN artist ar ON ar.id = t.artist_id
+          LEFT JOIN album al ON al.id = t.album_id
+          JOIN media_file f ON f.track_id = t.id "
+    };
+}
+
+pub(crate) use {track_columns, track_tables};
+
 macro_rules! select_tracks {
     () => {
-        "SELECT t.id, t.title, t.artist_id, ar.name AS artist_name, t.album_id,
-                al.title AS album_title, t.disc_no, t.track_no, t.duration_ms, t.added_at,
-                f.codec, f.lossless, f.sample_rate, f.channels, f.bitrate
-         FROM track t
-         JOIN artist ar ON ar.id = t.artist_id
-         LEFT JOIN album al ON al.id = t.album_id
-         JOIN media_file f ON f.track_id = t.id "
+        concat!("SELECT", track_columns!(), track_tables!())
     };
 }
 
@@ -123,7 +138,7 @@ impl TryFrom<AlbumRow> for Album {
 }
 
 #[derive(sqlx::FromRow)]
-struct TrackRow {
+pub(crate) struct TrackRow {
     id: i64,
     title: String,
     artist_id: i64,
@@ -179,7 +194,7 @@ impl TryFrom<TrackRow> for Track {
 }
 
 /// Converts a stored integer, which the schema's checks should keep in range.
-fn number<T: TryFrom<i64>>(value: i64, what: &str) -> Result<T, LibraryError> {
+pub(crate) fn number<T: TryFrom<i64>>(value: i64, what: &str) -> Result<T, LibraryError> {
     T::try_from(value)
         .map_err(|_| LibraryError::storage(format!("the stored {what} {value} is out of range")))
 }
@@ -206,22 +221,16 @@ pub(crate) fn album_kind_text(kind: AlbumKind) -> &'static str {
 
 /// A `LIMIT` or `OFFSET` value. SQLite takes an `i64`; anything larger means
 /// "no limit" in practice.
-fn sql_count(count: usize) -> i64 {
+pub(crate) fn sql_count(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
 }
 
-fn tracks(rows: Vec<TrackRow>) -> Result<Vec<Track>, LibraryError> {
+pub(crate) fn tracks(rows: Vec<TrackRow>) -> Result<Vec<Track>, LibraryError> {
     rows.into_iter().map(Track::try_from).collect()
 }
 
 fn albums(rows: Vec<AlbumRow>) -> Result<Vec<Album>, LibraryError> {
     rows.into_iter().map(Album::try_from).collect()
-}
-
-fn unsupported<T>(what: &str) -> Result<T, LibraryError> {
-    Err(LibraryError::Unsupported(format!(
-        "{what} are not implemented in the local library yet (issue #9)"
-    )))
 }
 
 impl LibraryBackend for LocalLibrary {
@@ -336,53 +345,49 @@ impl LibraryBackend for LocalLibrary {
     }
 
     async fn list_playlists(&self) -> Result<Vec<Playlist>, LibraryError> {
-        unsupported("playlists")
+        playlist::list(&self.pool).await
     }
 
-    async fn get_playlist(&self, _id: PlaylistId) -> Result<PlaylistContents, LibraryError> {
-        unsupported("playlists")
+    async fn get_playlist(&self, id: PlaylistId) -> Result<PlaylistContents, LibraryError> {
+        playlist::get(&self.pool, id).await
     }
 
-    async fn create_playlist(&self, _name: &str) -> Result<Playlist, LibraryError> {
-        unsupported("playlists")
+    async fn create_playlist(&self, name: &str) -> Result<Playlist, LibraryError> {
+        playlist::create(&self.pool, name).await
     }
 
-    async fn rename_playlist(
-        &self,
-        _id: PlaylistId,
-        _name: &str,
-    ) -> Result<Playlist, LibraryError> {
-        unsupported("playlists")
+    async fn rename_playlist(&self, id: PlaylistId, name: &str) -> Result<Playlist, LibraryError> {
+        playlist::rename(&self.pool, id, name).await
     }
 
-    async fn delete_playlist(&self, _id: PlaylistId) -> Result<(), LibraryError> {
-        unsupported("playlists")
+    async fn delete_playlist(&self, id: PlaylistId) -> Result<(), LibraryError> {
+        playlist::delete(&self.pool, id).await
     }
 
     async fn add_to_playlist(
         &self,
-        _id: PlaylistId,
-        _tracks: &[TrackId],
-        _at: Option<usize>,
+        id: PlaylistId,
+        tracks: &[TrackId],
+        at: Option<usize>,
     ) -> Result<Vec<PlaylistEntry>, LibraryError> {
-        unsupported("playlists")
+        playlist::add(&self.pool, id, tracks, at).await
     }
 
     async fn remove_from_playlist(
         &self,
-        _id: PlaylistId,
-        _entries: &[PlaylistEntryId],
+        id: PlaylistId,
+        entries: &[PlaylistEntryId],
     ) -> Result<(), LibraryError> {
-        unsupported("playlists")
+        playlist::remove(&self.pool, id, entries).await
     }
 
     async fn move_playlist_entry(
         &self,
-        _id: PlaylistId,
-        _entry: PlaylistEntryId,
-        _to: usize,
+        id: PlaylistId,
+        entry: PlaylistEntryId,
+        to: usize,
     ) -> Result<(), LibraryError> {
-        unsupported("playlists")
+        playlist::move_entry(&self.pool, id, entry, to).await
     }
 
     /// Joins the file's library root and its path within the root.
@@ -418,14 +423,14 @@ impl LibraryBackend for LocalLibrary {
 
     async fn record_play(
         &self,
-        _track: TrackId,
-        _device: &str,
-        _at: SystemTime,
+        track: TrackId,
+        device: &str,
+        at: SystemTime,
     ) -> Result<(), LibraryError> {
-        unsupported("play history")
+        history::record_play(&self.pool, track, device, at).await
     }
 
-    async fn recently_played(&self, _limit: usize) -> Result<Vec<Play>, LibraryError> {
-        unsupported("play history")
+    async fn recently_played(&self, limit: usize) -> Result<Vec<Play>, LibraryError> {
+        history::recently_played(&self.pool, limit).await
     }
 }
