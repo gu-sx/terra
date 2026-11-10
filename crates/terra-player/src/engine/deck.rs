@@ -207,6 +207,8 @@ impl Deck {
         let Some(playing) = self.current.as_mut() else {
             return;
         };
+        // Rodio's decoders stop at the end; so does the reported position.
+        let position = playing.total.map_or(position, |total| position.min(total));
         // The converters hold samples from before the seek: start new ones.
         let mut source = playing
             .output

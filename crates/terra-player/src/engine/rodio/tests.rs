@@ -192,3 +192,23 @@ fn a_seek_reports_the_new_position_first() {
         })
     );
 }
+
+#[test]
+fn a_seek_past_the_end_reports_the_end() {
+    let (mut engine, mut output, events) = capture();
+    let a = QueueItemId::fresh();
+    engine.load(a, &fixture("a.flac")).unwrap();
+    output.by_ref().take(4_800).for_each(drop);
+    events.try_iter().for_each(drop);
+    engine.seek(Duration::from_secs(10));
+    output.by_ref().take(480).for_each(drop);
+    let total = frames_to_duration(analysis::SPLIT as u64, 48_000);
+    assert_eq!(
+        events.try_iter().next(),
+        Some(EngineEvent::Position {
+            item: a,
+            elapsed: total,
+            total: Some(total),
+        })
+    );
+}
