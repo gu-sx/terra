@@ -53,7 +53,7 @@ Positions and events refer to the samples handed to the output, which the device
 
 ### Outputs
 
-`Player::open(Output::Device)` plays on the default device through cpal's ALSA host. `Output::Null` plays in real time to no device, for a headless run such as #12's `TERRA_AUDIO_OUTPUT=null`. `Player::capture()` gives the caller the samples to pull, as a device would, for tests; nothing plays until they are pulled.
+`Player::open(Output::Device)` plays on the default device through cpal's ALSA host. `Output::Null` plays in real time to no device, in stereo at 48 kHz, for a headless run such as #12's `TERRA_AUDIO_OUTPUT=null`. `Player::capture(channels, sample_rate)` gives the caller the samples to pull in that format, as a device would, for tests; nothing plays until they are pulled.
 
 Stream URLs (`AudioSource::Url`) are reported as unsupported until Phase 3.
 
@@ -66,11 +66,11 @@ While an item plays, the player hands the engine the item that follows it, so th
 The record sketches the engine as an `enqueue` onto Rodio's queue, bracketed by `EmptyCallback` sources. Rodio's queue cannot replace an item once it is appended, and Rodio's `Player::clear` and `Player::try_seek` block until the output has been pulled. So:
 
 1. **The engine trait has `load` and `set_next` in place of `enqueue`.** `load` starts an item now; `set_next` sets, or replaces, the one that follows. `seek` reports its result as an event instead of returning it.
-2. **The Rodio engine plays through one source of its own, the deck**, appended once to a Rodio `Player`, which still applies pause and volume. The engine posts operations to the deck, which applies them on the output's thread, in order, between spans of 10 ms. The deck reports start, end and position from the samples it hands out, which gives the exact events the record found in Rodio.
+2. **The Rodio engine plays through one source of its own, the deck**, appended once to a Rodio `Player`, which still applies pause and volume. The engine posts operations to the deck, which applies them on the output's thread, in order, every 10 ms of audio. The deck reports start, end and position from the samples it hands out, which gives the exact events the record found in Rodio.
 
 The record's capture method still holds: tests pull the Rodio `Player`'s output without a device, and the gapless test analyses it with the record's `analysis.rs`.
 
-When two items in a row have different sample rates or channel counts, the deck pads the rest of the current 10 ms span with silence before the second, so that Rodio rereads the format at a span boundary. Gapless playback between such items is impossible anyway; the record did not measure it.
+The deck plays in the output's format: the device's channel count and sample rate. It converts each item to that format with Rodio's own converters, one for the whole item, and reports its output to Rodio as one endless span. Rodio's mixer otherwise starts a new sample-rate converter at every span of its input, for example every packet of a decoder, and loses audio at each boundary: in a test, 2 s of 44.1 kHz audio came out of a 48 kHz mixer 202 samples short and drifting in phase. Through the deck the length is right and the phase holds. Because each item has its own converter, an item at another rate than the output starts up to one output sample off the grid of the item before it, within the record's ±1-sample threshold.
 
 ## Known limits
 

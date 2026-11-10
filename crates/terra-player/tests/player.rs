@@ -1,12 +1,18 @@
 //! The player with the real engine and no device: the test pulls the
 //! samples a device would. Nothing needs an audio device or the network.
 
+use std::num::NonZero;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use terra_core::AudioSource;
 use terra_player::{Capture, Player, PlayerEvent, QueueItemId};
+
+/// A player with no device, in the fixtures' own format: mono, 48 kHz.
+fn capture() -> (Player, Receiver<PlayerEvent>, Capture) {
+    Player::capture(NonZero::new(1).unwrap(), NonZero::new(48_000).unwrap()).unwrap()
+}
 
 fn fixture(name: &str) -> AudioSource {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -55,7 +61,7 @@ fn positions(events: &[PlayerEvent], of: QueueItemId) -> Vec<Duration> {
 
 #[test]
 fn two_files_play_in_order_with_increasing_positions() {
-    let (player, events, mut capture) = Player::capture().unwrap();
+    let (player, events, mut capture) = capture();
     let a = player.play(fixture("a.flac")).unwrap();
     let b = player.append(fixture("b.flac")).unwrap();
     let mut seen = Vec::new();
@@ -100,7 +106,7 @@ fn two_files_play_in_order_with_increasing_positions() {
 
 #[test]
 fn after_a_seek_the_next_position_is_at_least_the_target() {
-    let (player, events, mut capture) = Player::capture().unwrap();
+    let (player, events, mut capture) = capture();
     let a = player.play(fixture("a.flac")).unwrap();
     let mut seen = Vec::new();
     pull_until(&player, &mut capture, &events, &mut seen, |seen| {
@@ -126,7 +132,7 @@ fn after_a_seek_the_next_position_is_at_least_the_target() {
 
 #[test]
 fn pause_holds_the_position_and_resume_continues() {
-    let (player, events, mut capture) = Player::capture().unwrap();
+    let (player, events, mut capture) = capture();
     let a = player.play(fixture("a.flac")).unwrap();
     let mut seen = Vec::new();
     pull_until(&player, &mut capture, &events, &mut seen, |seen| {
@@ -149,7 +155,7 @@ fn pause_holds_the_position_and_resume_continues() {
 
 #[test]
 fn a_missing_file_is_reported_and_skipped() {
-    let (player, events, mut capture) = Player::capture().unwrap();
+    let (player, events, mut capture) = capture();
     let missing = player.play(fixture("missing.flac")).unwrap();
     let mut seen: Vec<PlayerEvent> = events.try_iter().collect();
     assert!(matches!(
@@ -166,7 +172,7 @@ fn a_missing_file_is_reported_and_skipped() {
 
 #[test]
 fn stream_urls_are_reported_as_unsupported() {
-    let (player, events, _capture) = Player::capture().unwrap();
+    let (player, events, _capture) = capture();
     let url = "http://127.0.0.1:9/stream".parse().unwrap();
     player.play(AudioSource::Url(url)).unwrap();
     assert!(matches!(
@@ -180,7 +186,7 @@ fn stream_urls_are_reported_as_unsupported() {
 
 #[test]
 fn every_handle_controls_the_same_player_until_the_last_is_dropped() {
-    let (player, events, _capture) = Player::capture().unwrap();
+    let (player, events, _capture) = capture();
     let other = player.clone();
     std::thread::spawn(move || other.stop().unwrap())
         .join()

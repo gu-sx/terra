@@ -4,6 +4,7 @@
 
 mod analysis;
 
+use std::num::NonZero;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -15,6 +16,7 @@ use rodio::Source;
 
 use super::{RodioEngine, open};
 use crate::QueueItemId;
+use crate::engine::deck::Format;
 use crate::engine::{Engine, EngineEvent, EventSink, frames_to_duration};
 
 fn fixture(name: &str) -> AudioSource {
@@ -29,7 +31,12 @@ fn capture() -> (RodioEngine, SourcesQueueOutput, Receiver<EngineEvent>) {
     let sink = EventSink::new(move |event| {
         let _ = sender.send(event);
     });
-    let (engine, output) = RodioEngine::capture(sink);
+    // The fixtures' own format: mono, 48 kHz.
+    let format = Format {
+        channels: NonZero::new(1).unwrap(),
+        rate: NonZero::new(48_000).unwrap(),
+    };
+    let (engine, output) = RodioEngine::capture(sink, format);
     (engine, output, events)
 }
 

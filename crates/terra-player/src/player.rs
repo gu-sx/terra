@@ -10,6 +10,7 @@ use rodio::Source;
 use rodio::queue::SourcesQueueOutput;
 use terra_core::AudioSource;
 
+use crate::engine::deck::Format;
 use crate::engine::rodio::RodioEngine;
 use crate::engine::{Engine, EngineEvent, EventSink};
 use crate::{PlayerError, Queue, QueueItemId, Repeat};
@@ -103,12 +104,12 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// The channel count of the samples about to come.
+    /// The channel count the capture was started with.
     pub fn channels(&self) -> NonZero<u16> {
         self.output.channels()
     }
 
-    /// The sample rate of the samples about to come.
+    /// The sample rate the capture was started with.
     pub fn sample_rate(&self) -> NonZero<u32> {
         self.output.sample_rate()
     }
@@ -134,11 +135,19 @@ impl Player {
 
     /// Starts a player with the real engine and no device: nothing plays
     /// until the caller pulls samples from the [`Capture`], as a device
-    /// would.
-    pub fn capture() -> Result<(Player, Receiver<PlayerEvent>, Capture), PlayerError> {
+    /// would. The samples come in `channels` and `sample_rate`, whatever the
+    /// format of the items.
+    pub fn capture(
+        channels: NonZero<u16>,
+        sample_rate: NonZero<u32>,
+    ) -> Result<(Player, Receiver<PlayerEvent>, Capture), PlayerError> {
+        let format = Format {
+            channels,
+            rate: sample_rate,
+        };
         let (outputs, output) = mpsc::channel();
         let (player, events) = spawn(move |events| {
-            let (engine, output) = RodioEngine::capture(events);
+            let (engine, output) = RodioEngine::capture(events, format);
             let _ = outputs.send(output);
             Ok(engine)
         })?;

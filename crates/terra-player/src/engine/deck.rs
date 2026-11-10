@@ -4,17 +4,18 @@
 //! Rodio's own queue cannot replace an item once it is appended, and its
 //! `Player::clear` and `Player::try_seek` block until the output has been
 //! pulled. The deck takes their place: the engine posts operations to it, and
-//! the deck applies them on the output's thread, between spans, in order.
-//! Because it is a single source, the item after the current one can be
-//! swapped at any time before the join, and the join stays gapless.
+//! the deck applies them on the output's thread every [`TICK_FRAMES`]
+//! frames, in order. Because it is a single source, the item after the
+//! current one can be swapped at any time before the join, and the join
+//! stays gapless.
 //!
-//! The deck splits its output into spans of [`SPAN_FRAMES`] frames, after
-//! each of which Rodio rereads the channel count and sample rate. A track
-//! starts within a span when its format matches the span's; otherwise the
-//! deck pads the span with silence, which only happens where gapless playback
-//! is impossible anyway.
+//! The deck plays in one fixed format, the output's, and converts each item
+//! to it with one converter for the whole item. Rodio's mixer starts a new
+//! sample-rate converter for every span of its input and loses audio at each
+//! boundary; a source in the mixer's own format passes through it
+//! unconverted, so the deck reports a single endless span and Rodio never
+//! converts again.
 
-use std::cell::RefCell;
 use std::mem;
 use std::num::NonZero;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,12 +23,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rodio::Source;
+use rodio::conversions::{ChannelCountConverter, SampleRateConverter};
 
 use super::{EngineEvent, EventSink, duration_to_frames, frames_to_duration};
 use crate::{PlayerError, QueueItemId};
 
-/// Frames per span: 10 ms at 48 kHz. Operations wait at most this long.
-const SPAN_FRAMES: usize = 480;
+/// Frames between two applications of the posted operations: 10 ms at
+/// 48 kHz. Operations wait at most this long.
+const TICK_FRAMES: usize = 480;
 
 /// How often the deck reports the position of the current item, in
 /// milliseconds of its audio.
@@ -80,90 +83,93 @@ impl DeckControl {
     }
 }
 
+/// The output's format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Format {
+    pub(crate) channels: NonZero<u16>,
+    pub(crate) rate: NonZero<u32>,
+}
+
+type Converted = ChannelCountConverter<SampleRateConverter<Box<dyn Source + Send>>>;
+
+/// Converts `source` to `to`, with one converter for all of it.
+fn convert(source: Box<dyn Source + Send>, to: Format) -> Converted {
+    let (channels, rate) = (source.channels(), source.sample_rate());
+    let resampled = SampleRateConverter::new(source, rate, to.rate, channels);
+    ChannelCountConverter::new(resampled, channels, to.channels)
+}
+
 /// The current item and how far it has played.
 struct Playing {
     item: QueueItemId,
-    source: Box<dyn Source + Send>,
-    channels: NonZero<u16>,
+    /// The item, converted to the output's format. `None` only during a seek.
+    output: Option<Converted>,
+    /// The item's own sample rate.
     rate: NonZero<u32>,
     total: Option<Duration>,
-    /// The frame the source stood at when `samples` was last zero: zero, or
-    /// where a seek landed.
-    base_frames: u64,
-    /// Samples played since `base_frames`.
+    /// Where `samples` was last zero: the start, or where a seek landed.
+    base: Duration,
+    /// Output samples played since `base`.
     samples: u64,
     /// Whether [`EngineEvent::Started`] has been sent.
     started: bool,
     /// `samples` when the position was last reported, or `None` to report
-    /// it at the next span.
+    /// it at the next tick.
     reported_at: Option<u64>,
 }
 
 impl Playing {
-    fn new(track: Track) -> Self {
+    fn new(track: Track, format: Format) -> Self {
         Self {
             item: track.item,
-            channels: track.source.channels(),
             rate: track.source.sample_rate(),
             total: track.source.total_duration(),
-            source: track.source,
-            base_frames: 0,
+            output: Some(convert(track.source, format)),
+            base: Duration::ZERO,
             samples: 0,
             started: false,
             reported_at: Some(0),
         }
     }
 
-    fn elapsed(&self) -> Duration {
-        let frames = self.base_frames + self.samples / u64::from(self.channels.get());
-        frames_to_duration(frames, self.rate.get())
+    fn elapsed(&self, format: Format) -> Duration {
+        let frames = self.samples / u64::from(format.channels.get());
+        self.base + frames_to_duration(frames, format.rate.get())
     }
 }
 
-struct State {
+/// The deck itself: append it once to a Rodio `Player` whose output has
+/// the deck's format.
+pub(crate) struct Deck {
     shared: Arc<Shared>,
     events: EventSink,
+    format: Format,
     current: Option<Playing>,
     next: Option<Track>,
-    /// The format of the span being played.
-    channels: NonZero<u16>,
-    rate: NonZero<u32>,
-    /// The span's length, and the samples left in it. A new span begins when
-    /// none are left and the output asks for a sample or for the span.
-    span_len: usize,
-    span_left: usize,
-    /// Silent samples to play before the current item, to finish a span in
-    /// the format of the item before it.
+    /// Samples left until the posted operations are applied again.
+    tick_left: usize,
+    /// Output samples played since the start, to keep frames whole.
+    played: u64,
+    /// Silent samples that finish a frame an item left incomplete.
     padding: usize,
 }
 
-/// The deck itself: append it once to a Rodio `Player`.
-pub(crate) struct Deck {
-    state: RefCell<State>,
-}
-
 impl Deck {
-    pub(crate) fn new(events: EventSink) -> (Deck, DeckControl) {
+    pub(crate) fn new(events: EventSink, format: Format) -> (Deck, DeckControl) {
         let shared = Arc::new(Shared::default());
-        let state = State {
+        let deck = Deck {
             shared: shared.clone(),
             events,
+            format,
             current: None,
             next: None,
-            channels: NonZero::new(2).unwrap(),
-            rate: NonZero::new(48_000).unwrap(),
-            span_len: 0,
-            span_left: 0,
+            tick_left: 0,
+            played: 0,
             padding: 0,
-        };
-        let deck = Deck {
-            state: RefCell::new(state),
         };
         (deck, DeckControl { shared })
     }
-}
 
-impl State {
     /// Applies the posted operations, in order.
     fn apply_ops(&mut self) {
         if !self.shared.pending.swap(false, Ordering::Acquire) {
@@ -173,13 +179,13 @@ impl State {
         for op in ops {
             match op {
                 Op::Load(track) => {
-                    self.current = Some(Playing::new(track));
+                    self.current = Some(Playing::new(track, self.format));
                     self.next = None;
                 }
                 Op::SetNext(track) => {
                     self.next = track;
                     if self.current.is_none() {
-                        self.current = self.next.take().map(Playing::new);
+                        self.start_next();
                     }
                 }
                 Op::Clear => {
@@ -191,13 +197,29 @@ impl State {
         }
     }
 
+    fn start_next(&mut self) {
+        let format = self.format;
+        self.current = self.next.take().map(|track| Playing::new(track, format));
+    }
+
     fn seek(&mut self, position: Duration) {
+        let format = self.format;
         let Some(playing) = self.current.as_mut() else {
             return;
         };
-        match playing.source.try_seek(position) {
+        // The converters hold samples from before the seek: start new ones.
+        let mut source = playing
+            .output
+            .take()
+            .expect("an item has its output outside a seek")
+            .into_inner()
+            .into_inner();
+        let result = source.try_seek(position);
+        playing.output = Some(convert(source, format));
+        match result {
             Ok(()) => {
-                playing.base_frames = duration_to_frames(position, playing.rate.get());
+                let frames = duration_to_frames(position, playing.rate.get());
+                playing.base = frames_to_duration(frames, playing.rate.get());
                 playing.samples = 0;
                 playing.reported_at = None;
             }
@@ -208,86 +230,85 @@ impl State {
         }
     }
 
-    /// Starts a span: applies the posted operations, reports the position
-    /// when it is due and takes the format of the current item.
-    fn begin_span(&mut self) {
-        self.apply_ops();
-        if let Some(playing) = self.current.as_mut() {
-            let every = u64::from(playing.rate.get())
-                * u64::from(playing.channels.get())
-                * POSITION_EVERY_MS
+    /// Reports the position of the current item when it is due.
+    fn report_position(&mut self) {
+        let format = self.format;
+        let Some(playing) = self.current.as_mut() else {
+            return;
+        };
+        let every =
+            u64::from(format.rate.get()) * u64::from(format.channels.get()) * POSITION_EVERY_MS
                 / 1000;
-            let due = match playing.reported_at {
-                None => true,
-                Some(at) => playing.samples - at >= every,
-            };
-            if playing.started && due {
-                playing.reported_at = Some(playing.samples);
-                self.events.send(EngineEvent::Position {
-                    item: playing.item,
-                    elapsed: playing.elapsed(),
-                    total: playing.total,
-                });
-            }
-            self.channels = playing.channels;
-            self.rate = playing.rate;
+        let due = match playing.reported_at {
+            None => true,
+            Some(at) => playing.samples - at >= every,
+        };
+        if playing.started && due {
+            playing.reported_at = Some(playing.samples);
+            self.events.send(EngineEvent::Position {
+                item: playing.item,
+                elapsed: playing.elapsed(format),
+                total: playing.total,
+            });
         }
-        self.span_len = SPAN_FRAMES * usize::from(self.channels.get());
-        self.span_left = self.span_len;
     }
 
-    fn ensure_span(&mut self) {
-        if self.span_left == 0 {
-            self.begin_span();
-        }
+    /// Applies the posted operations and reports the position.
+    fn tick(&mut self) {
+        self.tick_left = TICK_FRAMES * usize::from(self.format.channels.get());
+        self.apply_ops();
+        self.report_position();
     }
 
     /// The current item has played its last sample: report it and move to
-    /// the next one, within the span when the format allows.
+    /// the next one.
     fn end_current(&mut self) {
         let ended = self.current.take().expect("an item is playing");
         self.events.send(EngineEvent::Ended(ended.item));
         // A load or next item posted just now still makes the join.
         self.apply_ops();
         if self.current.is_none() {
-            self.current = self.next.take().map(Playing::new);
+            self.start_next();
         }
-        let played = self.span_len - self.span_left;
-        let channels = usize::from(self.channels.get());
-        self.padding = match &self.current {
-            Some(next) if (next.channels, next.rate) != (self.channels, self.rate) => {
-                self.span_left
-            }
-            // A source that stopped within a frame: finish the frame.
-            _ => (channels - played % channels) % channels,
-        };
+        // An item that stopped within a frame: finish the frame.
+        let channels = u64::from(self.format.channels.get());
+        self.padding = ((channels - self.played % channels) % channels) as usize;
     }
 
     fn next_sample(&mut self) -> f32 {
         loop {
-            self.ensure_span();
+            if self.tick_left == 0 {
+                self.tick();
+            }
             if self.padding > 0 {
                 self.padding -= 1;
-                self.span_left -= 1;
-                return 0.0;
+                return self.emit(0.0);
             }
             let Some(playing) = self.current.as_mut() else {
-                self.span_left -= 1;
-                return 0.0;
+                return self.emit(0.0);
             };
             if !playing.started {
                 playing.started = true;
                 self.events.send(EngineEvent::Started(playing.item));
             }
-            match playing.source.next() {
+            let output = playing
+                .output
+                .as_mut()
+                .expect("an item has its output outside a seek");
+            match output.next() {
                 Some(sample) => {
                     playing.samples += 1;
-                    self.span_left -= 1;
-                    return sample;
+                    return self.emit(sample);
                 }
                 None => self.end_current(),
             }
         }
+    }
+
+    fn emit(&mut self, sample: f32) -> f32 {
+        self.tick_left -= 1;
+        self.played += 1;
+        sample
     }
 }
 
@@ -295,32 +316,28 @@ impl Iterator for Deck {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        Some(self.state.get_mut().next_sample())
+        Some(self.next_sample())
     }
 }
 
 impl Source for Deck {
-    // Rodio asks for the span's format between spans; the deck begins the
-    // span then, so the answer holds for every sample of it.
+    /// One endless span: the format never changes.
     fn current_span_len(&self) -> Option<usize> {
-        let mut state = self.state.borrow_mut();
-        state.ensure_span();
-        Some(state.span_len)
+        None
     }
 
     fn channels(&self) -> NonZero<u16> {
-        let mut state = self.state.borrow_mut();
-        state.ensure_span();
-        state.channels
+        self.format.channels
     }
 
     fn sample_rate(&self) -> NonZero<u32> {
-        let mut state = self.state.borrow_mut();
-        state.ensure_span();
-        state.rate
+        self.format.rate
     }
 
     fn total_duration(&self) -> Option<Duration> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests;

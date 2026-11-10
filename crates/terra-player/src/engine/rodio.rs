@@ -3,6 +3,7 @@
 //! and cpal's default ALSA output.
 
 use std::fs::File;
+use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +14,7 @@ use rodio::queue::SourcesQueueOutput;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 use terra_core::AudioSource;
 
-use super::deck::{Deck, DeckControl, Track};
+use super::deck::{Deck, DeckControl, Format, Track};
 use super::opus::OpusSource;
 use super::{Engine, EventSink};
 use crate::{PlayerError, QueueItemId};
@@ -45,11 +46,12 @@ impl Drop for OutputGuard {
 }
 
 impl RodioEngine {
-    /// An engine whose output the caller pulls, as the device would: the
-    /// spike's capture method.
-    pub(crate) fn capture(events: EventSink) -> (RodioEngine, SourcesQueueOutput) {
+    /// An engine whose output, in `format`, the caller pulls as the device
+    /// would: the spike's capture method.
+    pub(crate) fn capture(events: EventSink, format: Format) -> (RodioEngine, SourcesQueueOutput) {
         let (player, output) = rodio::Player::new();
-        (Self::with_player(player, events, OutputGuard::None), output)
+        let engine = Self::with_player(player, events, format, OutputGuard::None);
+        (engine, output)
     }
 
     /// An engine that plays on the default output device.
@@ -57,12 +59,13 @@ impl RodioEngine {
         let mut sink = DeviceSinkBuilder::open_default_sink()
             .map_err(|e| PlayerError::Output(e.to_string()))?;
         sink.log_on_drop(false);
+        let format = Format {
+            channels: sink.config().channel_count(),
+            rate: sink.config().sample_rate(),
+        };
         let player = rodio::Player::connect_new(sink.mixer());
-        Ok(Self::with_player(
-            player,
-            events,
-            OutputGuard::Device { _sink: sink },
-        ))
+        let output = OutputGuard::Device { _sink: sink };
+        Ok(Self::with_player(player, events, format, output))
     }
 
     /// An engine that plays in real time to no device.
@@ -74,11 +77,25 @@ impl RodioEngine {
             .name("terra-player-null".to_owned())
             .spawn(move || pull_in_real_time(output, &stopped))
             .map_err(|e| PlayerError::Output(e.to_string()))?;
-        Ok(Self::with_player(player, events, OutputGuard::Null(stop)))
+        let format = Format {
+            channels: NonZero::new(2).unwrap(),
+            rate: NonZero::new(48_000).unwrap(),
+        };
+        Ok(Self::with_player(
+            player,
+            events,
+            format,
+            OutputGuard::Null(stop),
+        ))
     }
 
-    fn with_player(player: rodio::Player, events: EventSink, output: OutputGuard) -> RodioEngine {
-        let (deck, control) = Deck::new(events);
+    fn with_player(
+        player: rodio::Player,
+        events: EventSink,
+        format: Format,
+        output: OutputGuard,
+    ) -> RodioEngine {
+        let (deck, control) = Deck::new(events, format);
         player.append(deck);
         RodioEngine {
             player,
