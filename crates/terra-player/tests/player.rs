@@ -171,17 +171,23 @@ fn a_missing_file_is_reported_and_skipped() {
 }
 
 #[test]
-fn stream_urls_are_reported_as_unsupported() {
+fn stream_urls_are_reported_as_unsupported_without_their_secrets() {
     let (player, events, _capture) = capture();
-    let url = "http://127.0.0.1:9/stream".parse().unwrap();
+    // A stream URL can carry credentials, as OpenSubsonic's token does.
+    let url = "http://listener:synthetic-password@127.0.0.1:9/rest/stream?id=1&t=synthetic-token"
+        .parse()
+        .unwrap();
     player.play(AudioSource::Url(url)).unwrap();
-    assert!(matches!(
-        events.try_iter().next(),
-        Some(PlayerEvent::Error {
-            error: terra_player::PlayerError::Unsupported(_),
-            ..
-        })
-    ));
+    let Some(PlayerEvent::Error {
+        error: error @ terra_player::PlayerError::Unsupported(_),
+        ..
+    }) = events.try_iter().next()
+    else {
+        panic!("no unsupported error");
+    };
+    for shown in [error.to_string(), format!("{error:?}")] {
+        assert!(!shown.contains("synthetic"), "{shown}");
+    }
 }
 
 #[test]

@@ -166,10 +166,11 @@ impl Engine for RodioEngine {
 fn open(source: &AudioSource) -> Result<Box<dyn Source + Send>, PlayerError> {
     let path = match source {
         AudioSource::LocalPath(path) => path,
-        AudioSource::Url(url) => {
-            return Err(PlayerError::Unsupported(format!(
-                "stream URLs cannot be played yet: {url}"
-            )));
+        // The URL itself stays out of the message: it can carry credentials.
+        AudioSource::Url(_) => {
+            return Err(PlayerError::Unsupported(
+                "stream URLs cannot be played yet".to_owned(),
+            ));
         }
     };
     let failed = |message: String| PlayerError::Decode(format!("{}: {message}", path.display()));
