@@ -13,7 +13,9 @@
 mod backend;
 mod error;
 mod fts;
+mod history;
 mod library;
+mod playlist;
 mod scan;
 mod time;
 mod write;

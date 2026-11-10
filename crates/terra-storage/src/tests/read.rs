@@ -6,9 +6,7 @@ use std::time::SystemTime;
 
 use tempfile::TempDir;
 use terra_core::testing::sample;
-use terra_core::{
-    AlbumFilter, AudioSource, LibraryBackend, LibraryError, Page, PlaylistId, TrackFilter,
-};
+use terra_core::{AlbumFilter, AudioSource, LibraryBackend, LibraryError, Page, TrackFilter};
 
 use super::sample_library;
 use crate::MissingFile;
@@ -114,22 +112,4 @@ async fn resolve_audio_source_of_a_missing_file_fails() {
         &library.resolve_audio_source(track.id).await.unwrap(),
         source
     );
-}
-
-#[tokio::test]
-async fn playlists_and_history_are_unsupported_until_issue_9() {
-    let dir = TempDir::new().unwrap();
-    let library = sample_library(dir.path()).await;
-
-    for result in [
-        library.list_playlists().await.map(drop),
-        library.get_playlist(PlaylistId::new(1)).await.map(drop),
-        library.create_playlist("Mix").await.map(drop),
-        library.recently_played(10).await.map(drop),
-    ] {
-        match result {
-            Err(LibraryError::Unsupported(message)) => assert!(message.contains("#9"), "{message}"),
-            other => panic!("expected Unsupported, got {other:?}"),
-        }
-    }
 }

@@ -7,7 +7,8 @@
 //! - [`update`] applies the action to the [`App`] state and returns the
 //!   [`Request`](app::Request)s for data it needs;
 //! - [`fetch`] runs a request against the backend, and [`receive`] stores
-//!   its [`Response`](app::Response);
+//!   its [`Response`](app::Response) and returns the requests it leads to,
+//!   such as reloading a playlist after an edit;
 //! - [`render`] draws the state.
 //!
 //! Only the rows of the main list that fit on the terminal are drawn.
@@ -19,6 +20,7 @@
 mod app;
 mod fetch;
 mod keymap;
+mod playlist;
 mod render;
 
 #[cfg(test)]
@@ -102,7 +104,9 @@ async fn event_loop<B: LibraryBackend>(
         // another acts on the list the first one loaded.
         tokio::select! {
             biased;
-            Some(response) = pending.next(), if !pending.is_empty() => receive(&mut app, response),
+            Some(response) = pending.next(), if !pending.is_empty() => {
+                requests = receive(&mut app, response);
+            }
             event = events.next() => match event {
                 Some(Ok(event)) => {
                     if let Some(action) = keymap::action_for_event(&app, &event) {
