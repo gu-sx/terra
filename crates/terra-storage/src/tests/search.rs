@@ -2,11 +2,11 @@
 
 use tempfile::TempDir;
 use terra_core::testing::sample;
-use terra_core::{LibraryBackend, SearchResults};
+use terra_core::{AlbumKind, LibraryBackend, SearchResults};
 
 use super::{new_track, sample_library};
 use crate::LocalLibrary;
-use crate::write::{RootId, insert_track};
+use crate::write::{NewAlbum, RootId, ensure_album, ensure_artist, insert_track};
 
 /// The names of what a search found: artists, albums and tracks.
 async fn found(library: &LocalLibrary, query: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -165,6 +165,63 @@ async fn any_combining_mark_is_ignored() {
         assert_eq!(
             found(&library, query).await.0,
             names(&["Café Ensemble"]),
+            "{query:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn names_are_folded_where_they_are_indexed() {
+    let dir = TempDir::new().unwrap();
+    let library = sample_library(dir.path()).await;
+    // An artist, album and track whose names hold an overline (U+0305),
+    // which the tokenizer would read as a separator, and precomposed Greek
+    // letters (έ, ύ, Ώ), whose accents it would keep.
+    let artist_name = "Ca\u{305}fe Δέλτα";
+    let album_title = "Νύχτα Ove\u{305}r";
+    let track_title = "Ma\u{305}rk Ώρα";
+    let (template, _) = &sample::library().tracks[0];
+    let mut conn = library.pool.acquire().await.unwrap();
+    let artist = ensure_artist(&mut conn, artist_name, artist_name)
+        .await
+        .unwrap();
+    let album = NewAlbum {
+        title: album_title,
+        album_artist: Some(artist),
+        year: None,
+        kind: AlbumKind::Album,
+    };
+    let album = ensure_album(&mut conn, &album).await.unwrap();
+    let mut track = new_track(template, RootId(1), "folded.flac");
+    track.title = track_title;
+    track.artist = artist;
+    track.album = Some(album);
+    insert_track(&mut conn, &track).await.unwrap();
+    drop(conn);
+
+    // The artist matches itself, its album (as album artist) and its track.
+    // The names come back as they were written.
+    let everything = (
+        names(&[artist_name]),
+        names(&[album_title]),
+        names(&[track_title]),
+    );
+    for query in ["cafe δελτα", "ca\u{305}fe ΔΈΛΤΑ", "CAFE δέλτα"] {
+        assert_eq!(found(&library, query).await, everything, "{query:?}");
+    }
+    // The album matches itself and its track.
+    for query in ["over νυχτα", "ove\u{305}r Νύχτα"] {
+        assert_eq!(
+            found(&library, query).await,
+            (names(&[]), names(&[album_title]), names(&[track_title])),
+            "{query:?}"
+        );
+    }
+    // The track matches by its title alone.
+    for query in ["mark ωρα", "ma\u{305}rk Ώρα", "MARK"] {
+        assert_eq!(
+            found(&library, query).await,
+            (names(&[]), names(&[]), names(&[track_title])),
             "{query:?}"
         );
     }
