@@ -10,11 +10,12 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use terra_core::testing::{MemoryLibrary, block_on};
-use terra_core::{LibraryBackend, Track, TrackId};
+use terra_core::{LibraryBackend, Page, Track, TrackFilter, TrackId};
 
 use super::app::{Action, App, Focus, Item, Load, Request, Response, receive, update};
 use super::fetch::fetch;
 use super::keymap::{self, Context, KEYMAP};
+use super::playlist::Modal;
 use super::render::{format_duration, help_line, render};
 
 const WIDTH: u16 = 80;
@@ -47,9 +48,18 @@ impl Harness {
 
     fn dispatch(&mut self, action: Action) {
         let requests = update(&mut self.app, action);
-        for request in requests {
-            let response = block_on(fetch(&self.library, request));
-            receive(&mut self.app, response);
+        self.answer(requests);
+    }
+
+    /// Runs the requests, and those their responses lead to, in order.
+    fn answer(&mut self, mut requests: Vec<Request>) {
+        while !requests.is_empty() {
+            let mut next = Vec::new();
+            for request in requests {
+                let response = block_on(fetch(&self.library, request));
+                next.extend(receive(&mut self.app, response));
+            }
+            requests = next;
         }
     }
 
@@ -105,6 +115,7 @@ fn name(item: &Item) -> String {
         Item::Artist(artist) => artist.name.clone(),
         Item::Album(album) => album.title.clone(),
         Item::Track(track) => track.title.clone(),
+        Item::Entry(entry) => entry.track.title.clone(),
     }
 }
 
@@ -151,7 +162,7 @@ fn first_screen_shows_the_sidebar_and_every_sample_track() {
         "┌──────────────────────────────────────────────────────────────────────────────┐",
         "│■ Nothing playing                                                             │",
         "│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│",
-        "│Tab focus  Enter open  Backspace back  / search  ? help  q quit               │",
+        "│Tab focus  Enter open  Backspace back  / search  a add  ? help  q quit        │",
         "└──────────────────────────────────────────────────────────────────────────────┘",
     ];
     assert_eq!(harness.screen(), expected);
@@ -346,11 +357,12 @@ fn a_response_for_a_closed_screen_is_dropped() {
 #[test]
 fn a_backend_error_is_shown_in_the_list() {
     let mut harness = Harness::sample();
-    let (id, view) = (harness.app.top().id, harness.app.top().view);
+    let top = harness.app.top();
+    let (id, load, view) = (top.id, top.load, top.view);
     receive(
         &mut harness.app,
         Response {
-            request: Request::Screen { id, view },
+            request: Request::Screen { id, load, view },
             result: Err("disk unplugged".to_owned()),
         },
     );
@@ -385,13 +397,14 @@ fn playlists_are_listed_in_the_sidebar() {
         );
     }
 
-    // The sidebar reaches the playlists; opening one changes nothing yet.
+    // The sidebar reaches the playlists, and opening one shows it.
     harness.type_text("hG");
     assert_eq!(harness.app.sidebar, 6);
     assert!(harness.screen()[13].starts_with("┃> Favorites"));
     harness.press(KeyCode::Enter);
-    assert_eq!(harness.app.focus, Focus::Sidebar);
-    assert_eq!(harness.app.breadcrumb(), "LIBRARY / ALL TRACKS");
+    assert_eq!(harness.app.focus, Focus::List);
+    assert_eq!(harness.app.breadcrumb(), "LIBRARY / FAVORITES");
+    assert!(harness.screen()[5].contains("Nothing here yet"));
 }
 
 /// A library with `count` tracks, numbered from 1, so the list scrolls.
@@ -548,4 +561,487 @@ fn a_response_for_a_cleared_search_does_not_replace_a_new_one() {
     }
     assert_eq!(harness.app.editing_search().unwrap().query, "m");
     assert_eq!(harness.names(), ["Midnight Drive"]);
+}
+
+/// The sample library with two playlists: "Driving", holding Midnight Drive,
+/// Sunrise and Last Light in that order, and "Favorites", empty. The sidebar
+/// shows them at 4 and 5.
+fn playlist_library() -> MemoryLibrary {
+    let library = MemoryLibrary::sample();
+    let tracks = block_on(library.list_tracks(TrackFilter::default(), Page::ALL)).unwrap();
+    let id = |title: &str| tracks.iter().find(|track| track.title == title).unwrap().id;
+    let driving = block_on(library.create_playlist("Driving")).unwrap();
+    let entries = [id("Midnight Drive"), id("Sunrise"), id("Last Light")];
+    block_on(library.add_to_playlist(driving.id, &entries, None)).unwrap();
+    block_on(library.create_playlist("Favorites")).unwrap();
+    library
+}
+
+impl Harness {
+    fn playlists() -> Self {
+        Self::new(playlist_library())
+    }
+
+    /// Opens the playlist at `index` of the sidebar's playlists.
+    fn open_playlist(&mut self, index: usize) {
+        self.type_text("hg");
+        for _ in 0..4 + index {
+            self.type_text("j");
+        }
+        self.press(KeyCode::Enter);
+    }
+
+    /// The playlists in the library, by name, with their entries' titles.
+    fn stored(&self) -> Vec<(String, Vec<String>)> {
+        let playlists = block_on(self.library.list_playlists()).unwrap();
+        playlists
+            .into_iter()
+            .map(|playlist| {
+                let contents = block_on(self.library.get_playlist(playlist.id)).unwrap();
+                let titles = contents.entries.into_iter().map(|entry| entry.track.title);
+                (playlist.name, titles.collect())
+            })
+            .collect()
+    }
+
+    /// The bottom bar's line of hints, prompts and messages.
+    fn status_line(&self) -> String {
+        self.screen()[22].clone()
+    }
+}
+
+fn stored(entries: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+    entries
+        .iter()
+        .map(|(name, titles)| {
+            let titles = titles.iter().map(|title| (*title).to_owned()).collect();
+            ((*name).to_owned(), titles)
+        })
+        .collect()
+}
+
+#[test]
+fn selecting_a_playlist_opens_its_entries() {
+    let mut harness = Harness::playlists();
+    harness.open_playlist(0);
+    assert_eq!(harness.app.focus, Focus::List);
+    assert_eq!(harness.app.breadcrumb(), "LIBRARY / DRIVING");
+    assert_eq!(harness.names(), ["Midnight Drive", "Sunrise", "Last Light"]);
+    let screen = harness.screen();
+    assert!(screen[1].ends_with("LIBRARY / DRIVING│"));
+    assert!(screen[4].contains("TITLE / ARTIST"));
+    assert!(screen[5].contains("> Midnight Drive / Artist A"));
+    assert!(screen[5].contains("05:42"));
+    // The open playlist is the sidebar's active entry, and All tracks no
+    // longer is.
+    let buffer = harness.buffer();
+    let driving = u16::try_from(row_of(&screen, "│> Driving")).unwrap();
+    assert_eq!(buffer[(4, driving)].fg, Color::Cyan);
+    assert_ne!(buffer[(4, 5)].fg, Color::Cyan);
+}
+
+#[test]
+fn n_creates_a_playlist_through_a_name_prompt() {
+    let mut harness = Harness::playlists();
+    harness.type_text("n");
+    assert!(harness.status_line().starts_with("│New playlist: █"));
+    assert!(harness.status_line().contains("Enter ok  Esc cancel│"));
+    // Keys are text in the prompt: `q` doesn't quit and `j` doesn't move.
+    harness.type_text("Road Trip qj");
+    harness.press(KeyCode::Backspace);
+    harness.press(KeyCode::Backspace);
+    harness.press(KeyCode::Backspace);
+    assert!(
+        harness
+            .status_line()
+            .starts_with("│New playlist: Road Trip█")
+    );
+    harness.press(KeyCode::Enter);
+
+    assert!(harness.app.modal.is_none());
+    assert!(!harness.app.quit);
+    assert!(harness.status_line().starts_with("│Created “Road Trip”  "));
+    assert_eq!(
+        harness.stored(),
+        stored(&[
+            ("Driving", &["Midnight Drive", "Sunrise", "Last Light"]),
+            ("Favorites", &[]),
+            ("Road Trip", &[])
+        ])
+    );
+    assert!(harness.screen()[13].starts_with("│  Road Trip"));
+    // The message goes with the next key.
+    harness.type_text("j");
+    assert!(harness.status_line().starts_with("│Tab focus"));
+}
+
+#[test]
+fn a_duplicate_name_shows_the_error_in_the_status_line() {
+    let mut harness = Harness::playlists();
+    harness.type_text("nfavorites");
+    harness.press(KeyCode::Enter);
+    let line = harness.status_line();
+    assert!(
+        line.starts_with(r#"│invalid input: a playlist named "favorites" already exists"#),
+        "{line}"
+    );
+    let buffer = harness.buffer();
+    assert_eq!(buffer[(1, 22)].fg, Color::Red);
+    assert_eq!(harness.stored().len(), 2);
+}
+
+#[test]
+fn esc_cancels_the_name_prompt() {
+    let mut harness = Harness::playlists();
+    harness.type_text("nNever");
+    let requests = update(&mut harness.app, Action::PromptCancel);
+    assert!(requests.is_empty());
+    assert!(harness.app.modal.is_none());
+    harness.type_text("n");
+    harness.press(KeyCode::Esc);
+    assert!(harness.app.modal.is_none());
+    assert!(harness.status_line().starts_with("│Tab focus"));
+    assert_eq!(harness.stored().len(), 2);
+}
+
+#[test]
+fn r_renames_the_selected_playlist_and_its_open_view() {
+    let mut harness = Harness::playlists();
+    // From the sidebar.
+    harness.type_text("hjjjjj");
+    harness.type_text("r");
+    assert!(
+        harness
+            .status_line()
+            .starts_with("│Rename “Favorites”: Favorites█")
+    );
+    for _ in 0.."Favorites".len() {
+        harness.press(KeyCode::Backspace);
+    }
+    harness.type_text("Best");
+    harness.press(KeyCode::Enter);
+    assert!(harness.status_line().starts_with("│Renamed to “Best”"));
+    assert_eq!(harness.stored()[0].0, "Best");
+
+    // From the open playlist, whose title follows.
+    harness.open_playlist(1);
+    assert_eq!(harness.app.breadcrumb(), "LIBRARY / DRIVING");
+    harness.type_text("r");
+    harness.press(KeyCode::Backspace);
+    harness.type_text("g Mix");
+    harness.press(KeyCode::Enter);
+    assert_eq!(harness.app.breadcrumb(), "LIBRARY / DRIVING MIX");
+    assert_eq!(harness.names(), ["Midnight Drive", "Sunrise", "Last Light"]);
+}
+
+#[test]
+fn rename_and_delete_need_a_playlist() {
+    let mut harness = Harness::playlists();
+    harness.type_text("r");
+    assert!(harness.app.modal.is_none());
+    assert!(
+        harness
+            .status_line()
+            .starts_with("│Select a playlist to rename")
+    );
+    harness.type_text("hD");
+    assert!(harness.app.modal.is_none());
+    assert!(
+        harness
+            .status_line()
+            .starts_with("│Select a playlist to delete")
+    );
+}
+
+#[test]
+fn shift_d_deletes_a_playlist_after_yes() {
+    let mut harness = Harness::playlists();
+    harness.open_playlist(0);
+    harness.type_text("D");
+    let line = harness.status_line();
+    assert!(line.starts_with("│Delete “Driving”?"), "{line}");
+    assert!(line.ends_with("y yes  n no│"), "{line}");
+    // Other keys do nothing while it asks.
+    harness.type_text("xjq");
+    assert!(!harness.app.quit);
+    assert_eq!(harness.app.cursor().selected, 0);
+    harness.type_text("y");
+
+    assert_eq!(harness.stored(), stored(&[("Favorites", &[])]));
+    assert!(harness.status_line().starts_with("│Deleted “Driving”"));
+    // The open playlist is gone, so the list goes back to all tracks.
+    assert_eq!(harness.app.breadcrumb(), "LIBRARY / ALL TRACKS");
+    assert_eq!(harness.names().len(), 6);
+    assert!(harness.screen()[11].starts_with("│> Favorites"));
+}
+
+#[test]
+fn cancelling_the_delete_confirmation_keeps_the_playlist() {
+    let mut harness = Harness::playlists();
+    harness.type_text("hjjjjD");
+    harness.type_text("n");
+    assert!(harness.app.modal.is_none());
+    harness.type_text("D");
+    harness.press(KeyCode::Esc);
+    assert!(harness.app.modal.is_none());
+    assert_eq!(harness.stored().len(), 2);
+    assert!(harness.status_line().starts_with("│Tab focus"));
+}
+
+#[test]
+fn a_adds_the_selected_track_through_the_picker() {
+    let mut harness = Harness::playlists();
+    harness.type_text("j");
+    assert_eq!(harness.selected(), "Last Light");
+    harness.type_text("a");
+    let screen = harness.screen();
+    let top = row_of(&screen, " Add “Last Light” to ");
+    assert!(screen[top + 1].contains("› █"));
+    assert!(screen[top + 2].contains("> Driving"));
+    assert!(screen[top + 3].contains("  Favorites"));
+
+    // The filter narrows the playlists, ignoring case; `j` is text.
+    harness.type_text("FAV");
+    let screen = harness.screen();
+    assert!(screen[top + 1].contains("› FAV█"));
+    assert!(screen[top + 2].contains("> Favorites"));
+    // The picker is 50 columns wide, in the middle of the screen.
+    let inside: String = screen[top + 3].chars().skip(15).take(50).collect();
+    assert_eq!(inside.trim_matches(|c| c == ' ' || c == '┃'), "");
+    harness.press(KeyCode::Enter);
+
+    assert!(harness.app.modal.is_none());
+    assert!(
+        harness
+            .status_line()
+            .starts_with("│Added “Last Light” to “Favorites”")
+    );
+    assert_eq!(
+        harness.stored()[1],
+        stored(&[("Favorites", &["Last Light"])])[0]
+    );
+}
+
+#[test]
+fn the_picker_moves_with_the_arrows_and_adds_from_any_track_list() {
+    let mut harness = Harness::playlists();
+    // A search result, added to the second playlist.
+    harness.type_text("/sunrise");
+    harness.press(KeyCode::Enter);
+    harness.type_text("a");
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Up);
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Enter);
+    // A playlist entry, added to its own playlist again.
+    harness.open_playlist(0);
+    harness.type_text("a");
+    harness.press(KeyCode::Enter);
+    assert_eq!(
+        harness.stored(),
+        stored(&[
+            (
+                "Driving",
+                &["Midnight Drive", "Sunrise", "Last Light", "Midnight Drive"]
+            ),
+            ("Favorites", &["Sunrise"]),
+        ])
+    );
+    assert_eq!(
+        harness.names(),
+        ["Midnight Drive", "Sunrise", "Last Light", "Midnight Drive"]
+    );
+}
+
+#[test]
+fn a_picker_filter_that_matches_nothing() {
+    let mut harness = Harness::playlists();
+    harness.type_text("azzz");
+    let screen = harness.screen();
+    row_of(&screen, "No playlists match “zzz”");
+    // Enter adds nothing and leaves the picker open; Esc closes it.
+    let requests = update(&mut harness.app, Action::PromptConfirm);
+    assert!(requests.is_empty());
+    assert!(matches!(harness.app.modal, Some(Modal::Picker(_))));
+    harness.press(KeyCode::Down);
+    harness.press(KeyCode::Backspace);
+    harness.press(KeyCode::Backspace);
+    harness.press(KeyCode::Backspace);
+    assert!(
+        harness
+            .screen()
+            .iter()
+            .any(|line| line.contains("> Driving"))
+    );
+    harness.press(KeyCode::Esc);
+    assert!(harness.app.modal.is_none());
+    assert_eq!(harness.stored()[1].1.len(), 0);
+}
+
+#[test]
+fn a_needs_a_track() {
+    let mut harness = Harness::playlists();
+    harness.type_text("hj");
+    harness.press(KeyCode::Enter);
+    harness.type_text("a");
+    assert!(harness.app.modal.is_none());
+    assert!(harness.status_line().starts_with("│Select a track to add"));
+    // From the sidebar, `a` doesn't reach into the list either.
+    harness.type_text("hga");
+    assert!(harness.app.modal.is_none());
+}
+
+#[test]
+fn x_removes_the_selected_entry() {
+    let mut harness = Harness::playlists();
+    harness.open_playlist(0);
+    harness.type_text("jx");
+    assert_eq!(harness.names(), ["Midnight Drive", "Last Light"]);
+    assert_eq!(harness.selected(), "Last Light");
+    harness.type_text("x");
+    assert_eq!(harness.selected(), "Midnight Drive");
+    assert_eq!(
+        harness.stored(),
+        stored(&[("Driving", &["Midnight Drive"]), ("Favorites", &[])])
+    );
+    harness.type_text("x");
+    assert!(harness.screen()[5].contains("Nothing here yet"));
+    // Nothing is left to remove.
+    let requests = update(&mut harness.app, Action::RemoveEntry);
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn x_and_moves_do_nothing_outside_a_playlist() {
+    let mut harness = Harness::playlists();
+    for action in [Action::RemoveEntry, Action::MoveEntryDown] {
+        assert!(update(&mut harness.app, action).is_empty());
+    }
+    assert_eq!(harness.names().len(), 6);
+    // Nor on search results inside a playlist.
+    harness.open_playlist(0);
+    harness.type_text("/sunrise");
+    harness.press(KeyCode::Enter);
+    for action in [Action::RemoveEntry, Action::MoveEntryDown] {
+        assert!(update(&mut harness.app, action).is_empty());
+    }
+    assert_eq!(harness.stored()[0].1.len(), 3);
+}
+
+#[test]
+fn shift_j_and_k_move_the_entry_and_stop_at_the_edges() {
+    let mut harness = Harness::playlists();
+    harness.open_playlist(0);
+    // Up at the top does nothing.
+    assert!(update(&mut harness.app, Action::MoveEntryUp).is_empty());
+    harness.type_text("J");
+    assert_eq!(harness.names(), ["Sunrise", "Midnight Drive", "Last Light"]);
+    assert_eq!(harness.selected(), "Midnight Drive");
+    harness.type_text("J");
+    assert_eq!(harness.names(), ["Sunrise", "Last Light", "Midnight Drive"]);
+    // Down at the bottom does nothing.
+    assert!(update(&mut harness.app, Action::MoveEntryDown).is_empty());
+    harness.type_text("kK");
+    assert_eq!(harness.names(), ["Last Light", "Sunrise", "Midnight Drive"]);
+    assert_eq!(harness.selected(), "Last Light");
+    assert!(harness.screen()[5].contains("> Last Light"));
+    assert_eq!(
+        harness.stored()[0].1,
+        ["Last Light", "Sunrise", "Midnight Drive"]
+    );
+}
+
+#[test]
+fn edits_run_one_at_a_time_and_reloads_wait_for_the_last() {
+    let mut harness = Harness::playlists();
+    harness.open_playlist(0);
+    // Two moves typed before the backend answers: the second waits.
+    let first = update(&mut harness.app, Action::MoveEntryDown);
+    let second = update(&mut harness.app, Action::MoveEntryDown);
+    assert!(matches!(first.as_slice(), [Request::Edit(_)]));
+    assert!(second.is_empty());
+    assert_eq!(harness.names(), ["Sunrise", "Last Light", "Midnight Drive"]);
+
+    // A reload sent before the edits is dropped.
+    let top = harness.app.top();
+    let stale = Request::Screen {
+        id: top.id,
+        load: top.load - 1,
+        view: top.view,
+    };
+
+    let [first] = <[Request; 1]>::try_from(first).unwrap();
+    let response = block_on(fetch(&harness.library, first));
+    let next = receive(&mut harness.app, response);
+    assert!(matches!(next.as_slice(), [Request::Edit(_)]));
+    let response = block_on(fetch(&harness.library, stale));
+    assert!(receive(&mut harness.app, response).is_empty());
+    assert_eq!(harness.names(), ["Sunrise", "Last Light", "Midnight Drive"]);
+
+    let [second] = <[Request; 1]>::try_from(next).unwrap();
+    let response = block_on(fetch(&harness.library, second));
+    let reloads = receive(&mut harness.app, response);
+    assert!(matches!(
+        reloads.as_slice(),
+        [Request::Playlists { .. }, Request::Screen { .. }]
+    ));
+    harness.answer(reloads);
+    assert_eq!(harness.names(), ["Sunrise", "Last Light", "Midnight Drive"]);
+    assert_eq!(harness.selected(), "Midnight Drive");
+    assert_eq!(
+        harness.stored()[0].1,
+        ["Sunrise", "Last Light", "Midnight Drive"]
+    );
+}
+
+#[test]
+fn a_failed_edit_drops_the_queued_ones_and_reloads() {
+    let mut harness = Harness::playlists();
+    harness.open_playlist(0);
+    let first = update(&mut harness.app, Action::RemoveEntry);
+    let queued = update(&mut harness.app, Action::MoveEntryDown);
+    assert!(queued.is_empty());
+    assert_eq!(harness.names(), ["Last Light", "Sunrise"]);
+    let [Request::Edit(edit)] = <[Request; 1]>::try_from(first).unwrap() else {
+        panic!("not an edit");
+    };
+    let reloads = receive(
+        &mut harness.app,
+        Response {
+            request: Request::Edit(edit),
+            result: Err("library storage failed".to_owned()),
+        },
+    );
+    harness.answer(reloads);
+    assert_eq!(harness.names(), ["Midnight Drive", "Sunrise", "Last Light"]);
+    assert!(harness.status_line().starts_with("│library storage failed"));
+    assert_eq!(harness.stored()[0].1.len(), 3);
+}
+
+#[test]
+fn the_playlist_keys_are_in_the_keymap() {
+    let browse = [
+        ('n', Action::NewPlaylist),
+        ('r', Action::RenamePlaylist),
+        ('D', Action::DeletePlaylist),
+        ('a', Action::AddToPlaylist),
+        ('x', Action::RemoveEntry),
+        ('J', Action::MoveEntryDown),
+        ('K', Action::MoveEntryUp),
+    ];
+    for (c, action) in browse {
+        let key = keymap::Key::from_event(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        assert_eq!(keymap::action_for_key(Context::Browse, key), Some(action));
+    }
+    let key = |c| keymap::Key::from_event(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    assert_eq!(
+        keymap::action_for_key(Context::Prompt, key('n')),
+        Some(Action::PromptInput('n'))
+    );
+    assert_eq!(
+        keymap::action_for_key(Context::Confirm, key('y')),
+        Some(Action::PromptConfirm)
+    );
+    assert_eq!(keymap::action_for_key(Context::Confirm, key('x')), None);
 }
