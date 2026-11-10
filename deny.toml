@@ -1,0 +1,29 @@
+# cargo-deny configuration, read by .github/workflows/advisories.yml. Only the
+# advisories check runs; the keys follow cargo-deny 0.20.2, the version the
+# workflow pins.
+
+[advisories]
+# A vulnerable, unsound or unmaintained crate anywhere in the graph, direct or
+# transitive, fails the check.
+unsound = "all"
+unmaintained = "all"
+# A yanked version in Cargo.lock fails the check too.
+yanked = "deny"
+# Each entry gives the advisory id, why it is accepted for now and what removes
+# it.
+ignore = [
+  # SQLite before 3.54.0 can return uninitialised page-cache memory when it
+  # opens a database with a crafted `-wal` file of another page size.
+  # libsqlite3-sys 0.37.0 bundles SQLite 3.51.3; the fix is in 0.39.0, but
+  # SQLx 0.9.0, the latest release, requires libsqlite3-sys < 0.38.0. The
+  # attack needs a local party to write the library directory that terra
+  # opens, which is the user's own unless `--library` or `TERRA_LIBRARY` names
+  # another.
+  { id = "RUSTSEC-2026-0459", reason = "no SQLx release accepts libsqlite3-sys >= 0.39.0; local attack on a library directory someone else wrote; remove when SQLx allows the fixed version" },
+  # `paste` is archived. It is a procedural macro that lofty 0.25.5, the
+  # latest release, uses at build time; no code of it runs in terra.
+  { id = "RUSTSEC-2024-0436", reason = "unmaintained, not vulnerable; build-time macro of lofty 0.25.5, the latest release; remove when lofty drops it" },
+]
+# An ignore entry that no longer matches anything fails, so the list stays
+# current.
+unused-ignored-advisory = "deny"

@@ -1,0 +1,41 @@
+name: Advisories
+
+# Checks the locked dependencies against the RustSec advisory database. It
+# needs the network and a new advisory can turn it red without a code change,
+# so it is not part of `make check` and not a required check. It runs when the
+# lockfile or its own configuration changes, and weekly on main.
+on:
+  pull_request:
+    paths:
+      - Cargo.lock
+      - deny.toml
+      - .github/workflows/advisories.yml
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - deny.toml
+      - .github/workflows/advisories.yml
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reads rust-toolchain.toml and installs that toolchain with its components.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny@0.20.2
+      # --all-features takes in optional dependencies, such as terra-core's
+      # `testing` feature, as `make check` does.
+      - name: cargo deny check advisories
+        run: cargo deny --all-features --locked check advisories
