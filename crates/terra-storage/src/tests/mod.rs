@@ -6,7 +6,7 @@ mod lifecycle;
 mod playlists;
 mod read;
 mod records;
-mod scan;
+pub(crate) mod scan;
 mod search;
 
 use std::path::Path;
