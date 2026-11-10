@@ -1,6 +1,7 @@
 //! The engine trait the player drives, and what an engine reports back.
 
 pub(crate) mod deck;
+pub(crate) mod mp4;
 pub(crate) mod opus;
 pub(crate) mod rodio;
 
