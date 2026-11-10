@@ -16,9 +16,9 @@
 //!
 //! Only the rows of the main list that fit on the terminal are drawn.
 //!
-//! [`run`] drives that loop on a Tokio runtime over crossterm's event
-//! stream, in the terminal's alternate screen, and restores the terminal on
-//! exit and on panic.
+//! [`run`] drives that loop on the caller's Tokio runtime, which also runs
+//! the backend, over crossterm's event stream, in the terminal's alternate
+//! screen, and restores the terminal on exit and on panic.
 
 mod app;
 mod fetch;
@@ -37,20 +37,20 @@ use futures_util::stream::FuturesUnordered;
 use ratatui::DefaultTerminal;
 use terra_core::LibraryBackend;
 use terra_core::testing::MemoryLibrary;
+use tokio::runtime::Runtime;
 
 pub use app::{Action, App, handle_event, receive, update};
 pub use fetch::fetch;
 pub use render::render;
 
 /// Runs the TUI against the synthetic sample library until the user quits.
-pub fn run_demo() -> io::Result<()> {
+pub fn run_demo(runtime: &Runtime) -> io::Result<()> {
     let library = MemoryLibrary::sample();
-    run(&library, App::new("demo library"))
+    run(runtime, &library, App::new("demo library"))
 }
 
-/// Runs the TUI against `backend` until the user quits.
-pub fn run<B: LibraryBackend>(backend: &B, app: App) -> io::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+/// Runs the TUI against `backend` on `runtime` until the user quits.
+pub fn run<B: LibraryBackend>(runtime: &Runtime, backend: &B, app: App) -> io::Result<()> {
     let mut terminal = TerminalGuard::enter()?;
     runtime.block_on(event_loop(&mut terminal.terminal, backend, app))
 }

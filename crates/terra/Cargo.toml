@@ -12,8 +12,14 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
+# The XDG data directory, where the library lives by default.
+etcetera = "0.11.0"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 ratatui = "0.30.2"
 # `testing` provides the sample library that `terra tui --demo` runs on.
 terra-core = { path = "../terra-core", features = ["testing"] }
+terra-storage = { path = "../terra-storage" }
 tokio = { version = "1.54.1", default-features = false, features = ["rt", "macros"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
