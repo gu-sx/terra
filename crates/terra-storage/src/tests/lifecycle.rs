@@ -267,3 +267,56 @@ async fn open_reads_migrations_still_in_the_wal() {
     assert!(opened.is_ok(), "{opened:?}");
     creator.close().await;
 }
+
+/// Copies an outdated library whose writer is still open into a new
+/// directory, as a crash would leave it: the database file and its `-wal`
+/// file, and the `-shm` file when `with_shm` is set.
+async fn crashed_outdated_library(with_shm: bool) -> TempDir {
+    let source = TempDir::new().unwrap();
+    let writer = LocalLibrary::create(source.path()).await.unwrap();
+    sqlx::query("DELETE FROM _sqlx_migrations")
+        .execute(&writer.pool)
+        .await
+        .unwrap();
+    let mut suffixes = vec!["", "-wal"];
+    if with_shm {
+        suffixes.push("-shm");
+    }
+    let crashed = TempDir::new().unwrap();
+    for suffix in suffixes {
+        let name = format!("{DATABASE_FILE}{suffix}");
+        std::fs::copy(source.path().join(&name), crashed.path().join(&name)).unwrap();
+    }
+    writer.close().await;
+    crashed
+}
+
+#[tokio::test]
+async fn open_an_outdated_library_left_with_a_wal_keeps_the_database_and_wal() {
+    for with_shm in [true, false] {
+        let dir = crashed_outdated_library(with_shm).await;
+        let database = dir.path().join(DATABASE_FILE);
+        let wal = dir.path().join(format!("{DATABASE_FILE}-wal"));
+        let database_before = std::fs::read(&database).unwrap();
+        let wal_before = std::fs::read(&wal).unwrap();
+        assert!(!wal_before.is_empty(), "with_shm: {with_shm}");
+
+        // The -shm file is SQLite's index of the WAL, which a reader may
+        // create or rewrite, so the test says nothing about it.
+        let result = LocalLibrary::open(dir.path()).await;
+        assert!(
+            matches!(result, Err(Error::SchemaOutdated)),
+            "with_shm: {with_shm}: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&database).unwrap(),
+            database_before,
+            "with_shm: {with_shm}: open changed the database file"
+        );
+        assert_eq!(
+            std::fs::read(&wal).unwrap(),
+            wal_before,
+            "with_shm: {with_shm}: open changed the -wal file"
+        );
+    }
+}
