@@ -1,0 +1,69 @@
+//! Runs the state's requests against a [`LibraryBackend`].
+
+use std::collections::HashSet;
+
+use terra_core::{AlbumFilter, LibraryBackend, LibraryError, Page, TrackFilter};
+
+use super::app::{Item, Payload, Request, Response, View};
+
+/// How many results a search asks for in each category.
+pub const SEARCH_LIMIT: usize = 200;
+
+/// Runs a request and returns its response. A backend error becomes the
+/// response's error text.
+pub async fn fetch<B: LibraryBackend>(backend: &B, request: Request) -> Response {
+    let result = load(backend, &request)
+        .await
+        .map_err(|error| error.to_string());
+    Response { request, result }
+}
+
+async fn load<B: LibraryBackend>(backend: &B, request: &Request) -> Result<Payload, LibraryError> {
+    let items = match request {
+        Request::Playlists => return backend.list_playlists().await.map(Payload::Playlists),
+        Request::Screen { view, .. } => load_view(backend, *view).await?,
+        Request::Search { query, .. } => {
+            let results = backend.search(query, SEARCH_LIMIT).await?;
+            let artists = results.artists.into_iter().map(Item::Artist);
+            let albums = results.albums.into_iter().map(Item::Album);
+            let tracks = results.tracks.into_iter().map(Item::Track);
+            artists.chain(albums).chain(tracks).collect()
+        }
+    };
+    Ok(Payload::Items(items))
+}
+
+async fn load_view<B: LibraryBackend>(backend: &B, view: View) -> Result<Vec<Item>, LibraryError> {
+    Ok(match view {
+        View::Tracks(filter) => {
+            let tracks = backend.list_tracks(filter, Page::ALL).await?;
+            tracks.into_iter().map(Item::Track).collect()
+        }
+        View::Artists => {
+            let artists = backend.list_artists().await?;
+            artists.into_iter().map(Item::Artist).collect()
+        }
+        View::Albums(filter) => {
+            let albums = backend.list_albums(filter).await?;
+            albums.into_iter().map(Item::Album).collect()
+        }
+        View::ArtistAlbums(artist) => {
+            let filter = TrackFilter {
+                artist: Some(artist),
+                ..TrackFilter::default()
+            };
+            let appears_on: HashSet<_> = backend
+                .list_tracks(filter, Page::ALL)
+                .await?
+                .into_iter()
+                .filter_map(|track| track.album.map(|album| album.id))
+                .collect();
+            let albums = backend.list_albums(AlbumFilter::default()).await?;
+            albums
+                .into_iter()
+                .filter(|album| album.album_artist.id == artist || appears_on.contains(&album.id))
+                .map(Item::Album)
+                .collect()
+        }
+    })
+}
