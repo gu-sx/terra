@@ -1,0 +1,16 @@
+[package]
+name = "terra-player"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Local playback: the queue, the player handle and the Rodio engine"
+
+# Versions, features and system libraries as docs/decisions/0002-playback-engine.md
+# sets them: Rodio's ALSA output (not `cpal/pipewire`), its decoders for MP3,
+# FLAC, AAC and ALAC in M4A, and Opus through Symphonia and the system libopus.
+[dependencies]
+rodio = { version = "=0.23.0", default-features = false, features = ["playback", "mp3", "flac", "mp4", "symphonia-alac"] }
+symphonia = { version = "=0.5.5", default-features = false, features = ["ogg"] }
+symphonia-adapter-libopus = { version = "0.2.9", default-features = false }
+terra-core = { path = "../terra-core" }

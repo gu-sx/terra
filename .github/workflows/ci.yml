@@ -20,5 +20,9 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # terra-player builds Rodio's ALSA output and links the system libopus
+      # (docs/decisions/0002-playback-engine.md). The tests open no device.
+      - name: Install the audio libraries
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev libopus-dev
       - name: make check
         run: make check
