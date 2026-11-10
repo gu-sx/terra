@@ -66,11 +66,45 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 ///     }
 /// }
 /// ```
+///
+/// A backend that needs something to outlive it, such as the temporary
+/// directory its database is in, takes a `fixture` too. Each test evaluates
+/// `fixture` once, binds it to the name between the bars and then evaluates
+/// `backend`, which may borrow it; the fixture is dropped when the case ends.
+///
+/// ```no_run
+/// mod contract {
+///     terra_core::contract_tests! {
+///         run: terra_core::testing::block_on,
+///         fixture: terra_core::testing::sample::library(),
+///         backend: |sample| {
+///             let mut library = terra_core::testing::MemoryLibrary::new();
+///             for artist in &sample.artists {
+///                 library.insert_artist(artist.clone());
+///             }
+///             for album in &sample.albums {
+///                 library.insert_album(album.clone());
+///             }
+///             for (track, source) in &sample.tracks {
+///                 library.insert_track(track.clone(), source.clone());
+///             }
+///             library
+///         },
+///     }
+/// }
+/// ```
 #[macro_export]
 macro_rules! contract_tests {
     (run: $run:path, backend: $backend:expr $(,)?) => {
         $crate::contract_tests! {
-            @cases $run, $backend;
+            run: $run,
+            fixture: (),
+            backend: |_fixture| $backend,
+        }
+    };
+    (run: $run:path, fixture: $fixture:expr, backend: |$f:ident| $backend:expr $(,)?) => {
+        $crate::contract_tests! {
+            @cases ($run, $fixture, $f, $backend);
             create_playlist_lists_it,
             create_playlist_rejects_an_empty_name,
             create_playlist_rejects_a_duplicate_name_ignoring_case,
@@ -109,11 +143,14 @@ macro_rules! contract_tests {
             record_play_rejects_a_missing_track_or_an_empty_device,
         }
     };
-    (@cases $run:path, $backend:expr; $($case:ident),* $(,)?) => {
+    (@cases ($run:path, $fixture:expr, $f:ident, $backend:expr); $($case:ident),* $(,)?) => {
         $(
             #[test]
             fn $case() {
-                $run(async { $crate::testing::contract::$case($backend).await });
+                $run(async {
+                    let $f = $fixture;
+                    $crate::testing::contract::$case($backend).await
+                });
             }
         )*
     };
