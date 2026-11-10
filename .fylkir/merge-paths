@@ -1,0 +1,92 @@
+# Paths that make a pull request a human merge ("Agent merges" in AGENTS.md).
+# .fylkir/agent-merge.sh reads this file as it is on main, and
+# matches every changed path against each line as a shell glob, in which *
+# also matches /. Changes that trigger the security pass
+# (.fylkir/security-review.md) are human merges without being listed here.
+# Add the project's own: specs that only the responsible engineer approves,
+# schemas other projects depend on, deployment configuration.
+
+# Dependencies: manifests and lockfiles.
+Cargo.toml
+*/Cargo.toml
+Cargo.lock
+go.mod
+go.sum
+go.work
+go.work.sum
+package.json
+*/package.json
+package-lock.json
+*/package-lock.json
+npm-shrinkwrap.json
+yarn.lock
+*/yarn.lock
+pnpm-lock.yaml
+pnpm-workspace.yaml
+bun.lock
+bun.lockb
+.npmrc
+.yarnrc.yml
+pyproject.toml
+*/pyproject.toml
+requirements*.txt
+*/requirements*.txt
+Pipfile
+Pipfile.lock
+poetry.lock
+uv.lock
+setup.py
+setup.cfg
+Gemfile
+Gemfile.lock
+*.gemspec
+composer.json
+composer.lock
+pom.xml
+*/pom.xml
+build.gradle
+*/build.gradle
+build.gradle.kts
+*/build.gradle.kts
+settings.gradle
+settings.gradle.kts
+gradle/*
+mix.exs
+mix.lock
+Package.swift
+Package.resolved
+*.csproj
+packages.lock.json
+Directory.Packages.props
+flake.nix
+flake.lock
+vendor/*
+
+# CI, and the container images and toolchains CI and agents build with.
+.github/*
+.gitlab-ci.yml
+.circleci/*
+Dockerfile
+*/Dockerfile
+*.dockerfile
+.devcontainer/*
+rust-toolchain
+rust-toolchain.toml
+.tool-versions
+mise.toml
+.mise.toml
+
+# The agent workflow.
+.fylkir/*
+.claude/*
+.agents/*
+.codex/*
+AGENTS.md
+CLAUDE.md
+
+# Migrations.
+migrations/*
+*/migrations/*
+migrate/*
+*/migrate/*
+*.sql

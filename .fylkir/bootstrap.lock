@@ -1,0 +1,47 @@
+# Written by `fylkir bootstrap`, which reads it to tell the files you've changed from its own.
+# Commit it with them.
+
+template = "built-in"
+version = "0.1.12"
+project = "terra"
+check = "make check"
+default_branch = "main"
+
+[host.claude.roles.flake-hunter]
+args = ["--permission-mode", "auto"]
+
+[host.claude.roles.implementer]
+args = ["--permission-mode", "auto"]
+
+[host.claude.roles.orchestrator]
+args = ["--permission-mode", "auto"]
+
+[host.claude.roles.planner]
+args = ["--permission-mode", "auto"]
+
+[host.claude.roles.triager]
+args = ["--permission-mode", "auto"]
+
+[files]
+".agents/skills/flake/SKILL.md" = "ae70afdfd9b8110d453742297977731bcf2ef1a61338dec3415281850a561667"
+".agents/skills/issue/SKILL.md" = "d056f69057d38db1ba7f199998b9c5f692c94f5c04512f81b3872c917ae8e8f8"
+".agents/skills/orchestrate/SKILL.md" = "cf6124cf6b60052ed3b77f940e85c8ac1c39007e4cdc9155e0bb953e325a1d35"
+".agents/skills/triage-followups/SKILL.md" = "9d6e27f5e9c420b982636cf93221af992eb4f845d273d155ce08f63f7fcddd05"
+".agents/skills/work-package/SKILL.md" = "71e9f3100db3d2e892035770d160e35ebc99a8da1bc13a3bd012eebfe4e7e044"
+".claude/skills/flake/SKILL.md" = "ae70afdfd9b8110d453742297977731bcf2ef1a61338dec3415281850a561667"
+".claude/skills/issue/SKILL.md" = "d056f69057d38db1ba7f199998b9c5f692c94f5c04512f81b3872c917ae8e8f8"
+".claude/skills/orchestrate/SKILL.md" = "cf6124cf6b60052ed3b77f940e85c8ac1c39007e4cdc9155e0bb953e325a1d35"
+".claude/skills/triage-followups/SKILL.md" = "9d6e27f5e9c420b982636cf93221af992eb4f845d273d155ce08f63f7fcddd05"
+".claude/skills/work-package/SKILL.md" = "71e9f3100db3d2e892035770d160e35ebc99a8da1bc13a3bd012eebfe4e7e044"
+".codex/rules/review.rules" = "9696a261b3bbdeea67f4fa34770bf882f4477cef4e64d248d0611522ce7df2fa"
+".fylkir/agent-merge.sh" = "ae7e260e2c9983814ced2a64c7eace1d9378c3ca57187013049ea28c607937f4"
+".fylkir/merge-paths" = "f63f453393e190d5960ae32b7dd8eb6b9390d35021ffcd84fc95da852a29ea31"
+".fylkir/project.toml" = "42dbca3210a28dec0d10649382954cfcc922fbfcd6696639e0b1d8b3e288f37f"
+".fylkir/review-schema.json" = "e9ce3be37af5a17ff92843440c9dd7b3cc854f4ad456a5f9d5e708a1c3212d88"
+".fylkir/review.md" = "7289a07785474cb4405b74a3724a29003b25265c72ccf9ed3e02d819bca8e5bd"
+".fylkir/security-review-schema.json" = "54fd8a88ed25beabf5c946f2301d3ab304b30a768ee4cdb54b599dc750a47340"
+".fylkir/security-review.md" = "356cc4f212fa5d0db48acd530efd07f0cc9426633efc0c2a488a269b96cb0333"
+".github/ISSUE_TEMPLATE/work-package.md" = "4a3f6cdf0495b29e3346c220bb44bcdcc06bbc4c1b87cf84e4b26b7c55d35214"
+".github/pull_request_template.md" = "d34ce86a0dd5dfb58689a6ecb1cc77c78925765ef69dd7799b461355612a9bcb"
+"AGENTS.md" = "d4d6de9b1c64f2e2b4c8d92e5ab4626635156fd5526a37bbad74d58689b26872"
+"CLAUDE.md" = "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"

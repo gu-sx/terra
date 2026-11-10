@@ -1,0 +1,109 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "summary",
+    "areas",
+    "findings"
+  ],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Two or three sentences: which security-relevant paths the change touches and the reviewer's overall assessment."
+    },
+    "areas": {
+      "type": "array",
+      "description": "One entry per area in the brief's \"What to look for\" list.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "area",
+          "affected",
+          "evidence"
+        ],
+        "properties": {
+          "area": {
+            "type": "string",
+            "enum": [
+              "authentication",
+              "authorization",
+              "isolation",
+              "secrets",
+              "injection",
+              "ssrf",
+              "rate-limits",
+              "dependencies"
+            ]
+          },
+          "affected": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no"
+            ],
+            "description": "Whether the change touches this area."
+          },
+          "evidence": {
+            "type": "string",
+            "description": "What was checked and where, or why the change does not touch the area."
+          }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "category",
+          "file",
+          "line",
+          "summary",
+          "failure_scenario"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocker",
+              "major",
+              "minor"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "authentication",
+              "authorization",
+              "isolation",
+              "secrets",
+              "injection",
+              "ssrf",
+              "rate-limits",
+              "dependencies"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "Repository-relative path."
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-indexed line, or 0 if the finding is about a missing file."
+          },
+          "summary": {
+            "type": "string",
+            "description": "One sentence stating the defect."
+          },
+          "failure_scenario": {
+            "type": "string",
+            "description": "Who, with what input or state, gains which data or action."
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,67 @@
+# How Fylkir prepares an agent's worktree, and the roles its agents take. Fylkir reads roles from the
+# main checkout when an agent starts, so a branch can't change its own reviewer. AGENTS.md, "Agent
+# workflow", says which skill each role runs.
+
+[worktree]
+# Runs in every new worktree before the agent's first turn. It brings a new branch with no commits of
+# its own up to the latest main. A reviewer's detached checkout stays at the commit it was
+# given. Without an `origin` remote, or when the fetch fails, it changes nothing. It is safe to repeat.
+setup = '''
+if git symbolic-ref -q HEAD >/dev/null && git remote get-url origin >/dev/null 2>&1; then
+  if git fetch --quiet origin main; then
+    if git merge-base --is-ancestor HEAD origin/main; then
+      git merge --ff-only --quiet origin/main
+    fi
+  else
+    echo "Couldn't fetch main from origin; the branch stays where it started." >&2
+  fi
+fi
+'''
+# Runs when the agent is archived, before Fylkir removes the worktree. For example, to give each
+# worktree its own development environment, append a line such as `make dev-up` to `setup` and set:
+# teardown = "make dev-down"
+
+[roles.orchestrator]
+description = "Runs /orchestrate: starts workers for ready issues, merges what the gate accepts, never decides"
+provider = "claude"
+model = "sonnet"
+effort = "high"
+
+[roles.implementer]
+description = "Runs /issue: implements one issue, opens its pull request and has it reviewed"
+provider = "claude"
+model = "opus"
+effort = "high"
+
+[roles.planner]
+description = "Runs /work-package: researches the code and drafts work packages, filed once you approve; no branch"
+provider = "claude"
+model = "opus"
+effort = "high"
+# No branch: a checkout of the newest main, without the setup above, since it changes no file.
+workspace = "detached"
+
+[roles.triager]
+description = "Runs /triage-followups: settles open questions with you, then files the follow-ups you choose, four at a time"
+provider = "claude"
+model = "opus"
+effort = "high"
+workspace = "detached"
+
+[roles.flake-hunter]
+description = "Runs /flake: reproduces a flaky test, finds its cause and drafts a bug"
+provider = "claude"
+model = "opus"
+effort = "high"
+
+[roles.reviewer]
+description = "Reviews a pull request at a fixed commit and reports findings as JSON; changes nothing"
+provider = "codex"
+effort = "high"
+instructions = "Follow .fylkir/review.md exactly. Do not modify any file."
+
+[roles.security-reviewer]
+description = "Reviews a pull request's security at a fixed commit and reports findings as JSON; changes nothing"
+provider = "codex"
+effort = "high"
+instructions = "Follow .fylkir/security-review.md exactly. Do not modify any file."

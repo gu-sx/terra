@@ -1,0 +1,45 @@
+# Commands Codex refuses in this project, so that an independent reviewer
+# (.fylkir/review.md, .fylkir/security-review.md) cannot write to Git or
+# GitHub even if it tries. The reviewers need none of them: they read their
+# own detached checkout and report through their final message.
+#
+# Codex has no rules per role, so these apply to every Codex agent in this
+# project, and it loads a project's rules only when you trust the project.
+# Every other role runs on Claude Code by default. If you run one of them on
+# Codex, it needs these commands: give that role `--ignore-rules` in Fylkir's
+# own configuration (for example `[codex.roles.implementer]` in Fylkir's
+# config.toml), which leaves these rules in force for the reviewers.
+#
+# There are no allow rules here on purpose: an allow rule lets a command run
+# outside the Codex sandbox, and the reviewers need nothing outside it.
+
+prefix_rule(
+    pattern = ["git", ["push", "commit", "tag", "reset", "checkout", "switch", "restore", "stash", "merge", "rebase", "revert", "cherry-pick", "am", "apply", "clean", "worktree", "branch", "update-ref", "gc"]],
+    decision = "forbidden",
+    justification = "The reviewer never changes the branch, the checkout or the repository.",
+    match = ["git push origin HEAD", "git commit -m x", "git checkout main", "git stash"],
+    not_match = ["git diff origin/main...HEAD", "git log --oneline origin/main..HEAD", "git show HEAD"],
+)
+
+prefix_rule(
+    pattern = ["gh", "pr", ["merge", "comment", "review", "edit", "close", "reopen", "create", "ready", "checkout", "lock", "unlock"]],
+    decision = "forbidden",
+    justification = "The reviewer never writes to GitHub; the implementer posts the review.",
+    match = ["gh pr merge 1", "gh pr comment 1 --body x"],
+    not_match = ["gh pr view 1"],
+)
+
+prefix_rule(
+    pattern = ["gh", "issue", ["create", "edit", "comment", "close", "reopen", "delete", "transfer", "lock", "unlock", "pin", "unpin"]],
+    decision = "forbidden",
+    justification = "The reviewer never writes to GitHub.",
+    match = ["gh issue comment 1 --body x"],
+    not_match = ["gh issue view 1"],
+)
+
+prefix_rule(
+    pattern = ["gh", ["release", "api", "label", "workflow", "run", "repo", "secret", "variable"]],
+    decision = "forbidden",
+    justification = "The reviewer never publishes, reruns CI or calls the GitHub API directly.",
+    match = ["gh api repos/o/r", "gh release create v1"],
+)
