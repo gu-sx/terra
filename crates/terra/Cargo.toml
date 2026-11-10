@@ -1,0 +1,10 @@
+[package]
+name = "terra"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "terra"
+path = "src/main.rs"
