@@ -530,3 +530,22 @@ fn a_long_breadcrumb_keeps_the_library_name_and_its_own_end() {
     );
     assert!(header.ends_with("/ ARTIST A / NOCTURNES│"), "{header}");
 }
+
+#[test]
+fn a_response_for_a_cleared_search_does_not_replace_a_new_one() {
+    let mut harness = Harness::sample();
+    // Search for "a", clear it before its results arrive, then search for
+    // "m" on the same screen.
+    harness.type_text("/");
+    let abandoned = update(&mut harness.app, Action::SearchInput('a'));
+    harness.press(KeyCode::Esc);
+    harness.type_text("/");
+    let current = update(&mut harness.app, Action::SearchInput('m'));
+
+    for request in current.into_iter().chain(abandoned) {
+        let response = block_on(fetch(&harness.library, request));
+        receive(&mut harness.app, response);
+    }
+    assert_eq!(harness.app.editing_search().unwrap().query, "m");
+    assert_eq!(harness.names(), ["Midnight Drive"]);
+}

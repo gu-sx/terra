@@ -133,7 +133,9 @@ pub struct Search {
     pub query: String,
     /// Whether keys go into the query.
     pub editing: bool,
-    /// Counts the queries sent, so that only the latest one's results count.
+    /// Identifies the latest query sent, so that only its results count.
+    /// Unique across every search of the session, so that a response for a
+    /// cleared search never matches a later one.
     pub seq: u64,
     pub rows: Load<Vec<Item>>,
     pub cursor: Cursor,
@@ -234,6 +236,7 @@ pub struct App {
     /// How many rows of the main list fit on the terminal.
     pub list_height: usize,
     next_screen: ScreenId,
+    next_search: u64,
 }
 
 impl App {
@@ -251,6 +254,7 @@ impl App {
             quit: false,
             list_height: 0,
             next_screen: 0,
+            next_search: 0,
         };
         let root = app.screen(Browse::AllTracks.label(), Browse::AllTracks.view());
         app.stack.push(root);
@@ -452,13 +456,15 @@ impl App {
 
     /// Changes the query being typed and asks for its results.
     fn edit_query(&mut self, edit: impl FnOnce(&mut String)) -> Vec<Request> {
+        self.next_search += 1;
+        let seq = self.next_search;
         let top = self.top_mut();
         let screen = top.id;
         let Some(search) = top.search.as_mut().filter(|search| search.editing) else {
             return Vec::new();
         };
         edit(&mut search.query);
-        search.seq += 1;
+        search.seq = seq;
         if !search.is_active() {
             search.rows = Load::Loading;
             search.cursor = Cursor::default();
