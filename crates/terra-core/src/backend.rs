@@ -42,7 +42,8 @@ use crate::source::AudioSource;
 ///   alphanumeric. A record matches when every term is, ignoring case, a
 ///   prefix of a word in one of the record's searched fields, where the
 ///   fields are split into words the same way. A query without terms matches
-///   nothing.
+///   nothing. Whether accents are ignored (so that `e` matches `é`) is not
+///   part of the contract yet.
 pub trait LibraryBackend: Send + Sync {
     /// Searches artists, albums and tracks.
     ///
