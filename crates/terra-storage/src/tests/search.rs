@@ -137,10 +137,19 @@ async fn accents_on_latin_letters_are_ignored() {
     for query in ["cafe", "CAFÉ", "cafe\u{301}", "Café", "CAFE\u{301}"] {
         assert_eq!(found(&library, query).await, expected, "{query:?}");
     }
-    // A combining mark inside a word does not split it.
-    assert_eq!(
-        found(&library, "cafe\u{301} lig").await.2,
-        names(&["Café Lights"])
-    );
+    // A combining mark inside a word does not split it, wherever it is: "ca"
+    // and "fe" would be two terms, and no word starts with "fe".
+    for query in [
+        "cafe\u{301} lig",
+        "ca\u{301}fe lig",
+        "cáfe lig",
+        "c\u{327}afe lig",
+    ] {
+        assert_eq!(
+            found(&library, query).await.2,
+            names(&["Café Lights"]),
+            "{query:?}"
+        );
+    }
     assert_eq!(found(&library, "ártist c").await.0, names(&["Artist C"]));
 }
