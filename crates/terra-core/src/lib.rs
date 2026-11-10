@@ -5,12 +5,18 @@
 //! a remote one (a homelab server). This crate holds the types they share and
 //! the trait itself. It does no I/O and depends on no async runtime, so it
 //! knows nothing of the terminal, the database or HTTP.
+//!
+//! The feature `testing` adds [`testing`]: an in-memory backend, a synthetic
+//! sample library and a contract suite every backend can run.
 
 mod backend;
 mod error;
 mod id;
 mod model;
 mod source;
+
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use backend::LibraryBackend;
 pub use error::{LibraryError, Resource};
