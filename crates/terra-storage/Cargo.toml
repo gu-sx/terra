@@ -1,0 +1,16 @@
+[package]
+name = "terra-storage"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The local library: an SQLite database of tracks, albums, artists and playlists"
+
+[dependencies]
+sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite-bundled"] }
+terra-core = { path = "../terra-core" }
+
+[dev-dependencies]
+tempfile = "3"
+terra-core = { path = "../terra-core", features = ["testing"] }
+tokio = { version = "1", features = ["macros", "rt"] }
