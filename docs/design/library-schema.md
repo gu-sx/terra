@@ -16,7 +16,7 @@ A library is a directory holding the SQLite database `library.db`. `terra-storag
 
 - `LocalLibrary::create(dir)` creates `dir` if needed and `dir/library.db`, and applies every migration. It refuses a directory that already has a `library.db`.
 - `LocalLibrary::migrate(dir)` applies the migrations the database lacks.
-- `LocalLibrary::open(dir)` first reads, through a read-only connection, which migrations the database records. If one is missing it returns `SchemaOutdated` and writes nothing, not even the journal mode. If the database records a migration this build does not have, it returns `SchemaTooNew`; if a recorded migration's checksum differs from this build's, or one did not finish, `SchemaMismatch`.
+- `LocalLibrary::open(dir)` first reads, through a read-only connection, which migrations the database records. If one is missing it returns `SchemaOutdated` and writes nothing, not even the journal mode, and creates no file. A read-only connection to a WAL database would still create its `-wal` and `-shm` files, so when there is no `-wal` file, and so every committed page is in the database file, the check opens the file as immutable. When there is one, the files already exist and the check reads through them. If the database records a migration this build does not have, it returns `SchemaTooNew`; if a recorded migration's checksum differs from this build's, or one did not finish, `SchemaMismatch`.
 
 No migration ever runs as a side effect of opening a library (`AGENTS.md`). The migrations are embedded in the binary with SQLx's `migrate!`, which records them in SQLx's `_sqlx_migrations` table.
 
@@ -56,14 +56,17 @@ Phase 1 keeps one file per track: `media_file.track_id` is unique, and every tra
 
 ## Detecting moved files
 
-The scanner (issue #8) implements this, and documents the full algorithm here:
+The scanner (issue #8) implements this, and documents the full algorithm here. A file only counts as moved once the whole walk is done, so that a copy is never mistaken for a move:
 
-1. A file whose (`root`, `rel_path`) is known and whose size and modification time are unchanged is unchanged. It is not read.
-2. Any other file is read and hashed (BLAKE3, stored in `media_file.content_hash`, which is indexed).
-   - A known path is the same track: its fields are updated in place.
-   - An unknown path whose hash equals that of a known file that is missing, or that this scan has not seen, is that file moved: the file row takes the new path, the track keeps its ID and `missing_since` is cleared.
+1. Walk every root to the end and record each path seen.
+2. A file whose (`root`, `rel_path`) is known and whose size and modification time are unchanged is unchanged. It is not read.
+3. A known path whose size or modification time changed is read and hashed (BLAKE3, stored in `media_file.content_hash`, which is indexed) and is the same track: its fields are updated in place.
+4. Only after the walk, the known files the walk did not see, and those already missing, are the candidates for a move. Each unknown path is read and hashed:
+   - If its hash equals a candidate's, it is that file moved: the file row takes the new path, the track keeps its ID, `missing_since` is cleared and the candidate is used up. When several unknown paths share a candidate's hash, the first in (`root`, `rel_path`) order takes it.
    - Anything else is a new track.
-3. A known file that the scan did not see gets `missing_since`. Its track, playlist entries and plays stay; the field is cleared if the file comes back. `resolve_audio_source` refuses a missing file (below).
+5. The candidates left get `missing_since`. Their tracks, playlist entries and plays stay; the field is cleared if the file comes back. `resolve_audio_source` refuses a missing file (below).
+
+So a copy whose original is still in place is a new track, whichever of the two the walk reaches first, because a file the walk saw is never a candidate.
 
 The known limitation: the hash covers the whole file, tags included, so a file that is both moved and retagged between two scans looks like a new track, and the old one is reported missing.
 
