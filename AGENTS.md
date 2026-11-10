@@ -23,7 +23,15 @@ These apply to humans and coding agents.
 
 ```sh
 make check    # the checks CI runs
+make fmt      # format the workspace
 ```
+
+## Design documents
+
+- `docs/brief.md` is the product brief. Its §11 phases are the plan.
+- `docs/decisions/` holds decision records, `NNNN-<slug>.md`, in the format `docs/decisions/README.md` gives. A record is Accepted when the responsible engineer merges it.
+- `docs/design/` holds design documents.
+- A change that settles one of the brief's §13 open questions needs a decision record or a design document, which only the responsible engineer approves.
 
 ## Testing
 
@@ -31,6 +39,8 @@ make check    # the checks CI runs
 
 - Tests are deterministic and run in `make check`; none is hidden behind a flag CI doesn't set.
 - A skipped test names the issue that removes the skip.
+- Audio fixtures are synthetic: tones generated with ffmpeg, tagged with generic names such as "Artist A". Keep them small, and commit them together with the script that regenerates them.
+- Tests never need an audio device or the network.
 
 ## Checks before a pull request
 
@@ -44,7 +54,8 @@ Run these once before the first push, and again only after changing code; CI run
 Only one open issue should change each of these at a time; otherwise chain the issues with "Depends on". Two branches can each pass CI with them and still break `main`.
 
 <!-- For the project: list the files here, such as database migrations or a schema with a sequence number. -->
-- (list the files here)
+- `Cargo.toml` at the root: the workspace manifest.
+- `crates/terra-storage/migrations/`: migrations are numbered in sequence, so two branches can each add the same number.
 
 Other shared files, such as dependency manifests, lockfiles and generated code, end at worst in a merge conflict or a regeneration, which the later pull request resolves.
 
