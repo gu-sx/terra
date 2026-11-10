@@ -11,7 +11,9 @@
 mod backend;
 mod error;
 mod fts;
+mod history;
 mod library;
+mod playlist;
 mod time;
 // The scanner (issue #8) is the first caller outside the tests.
 #[cfg_attr(not(test), expect(dead_code))]
