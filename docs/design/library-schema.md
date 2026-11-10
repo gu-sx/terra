@@ -8,7 +8,7 @@ Proposed
 
 This document settles the brief's §13.2 ("Library model") for Phase 1: the schema of the local library database, the stable-ID rule, the strategy for detecting moved files, metadata precedence and compilation handling. Migration `crates/terra-storage/migrations/0001_initial.sql` implements it, and the two must agree. It follows the brief's §8 ("Database guidelines").
 
-The scanner (issue #8) adds its algorithm to this document. Playlists and history (issue #9) use the tables below without changing them.
+The scanner (issue #8) adds its algorithm to this document ("Scanning"). Playlists and history (issue #9) use the tables below without changing them.
 
 ## Files and lifecycle
 
@@ -16,7 +16,7 @@ A library is a directory holding the SQLite database `library.db`. `terra-storag
 
 - `LocalLibrary::create(dir)` creates `dir` if needed and `dir/library.db`, and applies every migration. It refuses a directory that already has a `library.db`.
 - `LocalLibrary::migrate(dir)` applies the migrations the database lacks.
-- `LocalLibrary::open(dir)` first reads, through a read-only connection, which migrations the database records. If one is missing it returns `SchemaOutdated` and writes nothing, not even the journal mode, and creates no file. A read-only connection to a WAL database would still create its `-wal` and `-shm` files, so when there is no `-wal` file, and so every committed page is in the database file, the check opens the file as immutable. When there is one, the files already exist and the check reads through them. If the database records a migration this build does not have, it returns `SchemaTooNew`; if a recorded migration's checksum differs from this build's, or one did not finish, `SchemaMismatch`.
+- `LocalLibrary::open(dir)` first reads, through a read-only connection, which migrations the database records. If one is missing it returns `SchemaOutdated` and leaves `library.db` and `library.db-wal` as they were: it writes to neither, not even the journal mode. A read-only connection to a WAL database would still create its `-wal` and `-shm` files, so when there is no `-wal` file, and so every committed page is in the database file, the check opens the file as immutable and changes and creates no file. When there is one, for example after a writer crashed, the check reads through it, and may create or rewrite `library.db-shm`: SQLite's shared-memory index of the WAL, which reading a WAL needs and which SQLite rebuilds from the WAL. If the database records a migration this build does not have, it returns `SchemaTooNew`; if a recorded migration's checksum differs from this build's, or one did not finish, `SchemaMismatch`.
 
 No migration ever runs as a side effect of opening a library (`AGENTS.md`). The migrations are embedded in the binary with SQLx's `migrate!`, which records them in SQLx's `_sqlx_migrations` table.
 
@@ -54,25 +54,61 @@ Foreign keys: a track references its artist and album, an album its album artist
 
 Phase 1 keeps one file per track: `media_file.track_id` is unique, and every track has a file. That split is what lets Phase 2 give derived tracks a source segment instead of a file of their own without changing the track's identity.
 
-## Detecting moved files
+## Scanning
 
-The scanner (issue #8) implements this, and documents the full algorithm here. A file only counts as moved once the whole walk is done, so that a copy is never mistaken for a move:
+The scanner, `crates/terra-storage/src/scan/`, keeps the library in step with the audio files under its roots. It reads tags and audio properties with Lofty 0.25.5, walks folders with walkdir 2.5.0 and hashes files with BLAKE3 (`blake3` 1.8.7). The file system work runs on Tokio's blocking threads.
 
-1. Walk every root to the end and record each path seen.
-2. A file whose (`root`, `rel_path`) is known and whose size and modification time are unchanged is unchanged. It is not read.
-3. A known path whose size or modification time changed is read and hashed (BLAKE3, stored in `media_file.content_hash`, which is indexed) and is the same track: its fields are updated in place.
-4. Only after the walk, the known files the walk did not see, and those already missing, are the candidates for a move. Each unknown path is read and hashed:
-   - If its hash equals a candidate's, it is that file moved: the file row takes the new path, the track keeps its ID, `missing_since` is cleared and the candidate is used up. When several unknown paths share a candidate's hash, the first in (`root`, `rel_path`) order takes it.
+### Roots
+
+`LocalLibrary::add_root(path)` stores a folder as a library root and returns the path it stored: `path` made absolute with symbolic links resolved (`std::fs::canonicalize`), so that one folder is never stored twice under two spellings. It refuses a path that is not a directory, is not valid UTF-8, or overlaps a root: is one already, is inside one or contains one. Overlapping roots would see the same file twice, as two different paths, and make it two tracks.
+
+`LocalLibrary::list_roots()` returns the roots ordered by path.
+
+**Proposed: removing a root removes its tracks.** `LocalLibrary::remove_root(path)` deletes the root, every track whose file is under it, and so those tracks' playlist entries and plays (`ON DELETE CASCADE`), in one transaction. The alternative, keeping the tracks as missing, would leave files that no root can find again. It returns whether `path` was a root, compared after resolving it as `add_root` does, or as given when that fails, such as for a folder that no longer exists. The responsible engineer decides.
+
+### The algorithm
+
+`LocalLibrary::scan(progress)` returns a `ScanReport { added, updated, moved, missing, unchanged, errors }`. Each file the walk found counts once, in `added`, `updated`, `moved`, `unchanged` or `errors`; `missing` counts the known files the walk did not find. After each file it calls `progress` with a `ScanProgress { done, total, path }`. A file only counts as moved once the whole walk is done, so that a copy is never mistaken for a move:
+
+1. Walk every root to the end, without following symbolic links and skipping hidden files and folders (whose name starts with `.`; a root's own name does not count). Keep the regular files whose extension is `mp3`, `flac`, `ogg`, `opus`, `m4a` or `wav`, ignoring ASCII case, with their size and modification time. A path that is not valid UTF-8, or that the walk cannot read, is an error and is not seen.
+2. A file whose (`root`, `rel_path`) is known and whose size and modification time are unchanged is unchanged. It is not read. If it was missing, `missing_since` is cleared and it counts as updated.
+3. A known path whose size or modification time changed is read and hashed (BLAKE3 over the whole file, stored in `media_file.content_hash`, which is indexed) and is the same track: its fields are updated in place, and `missing_since` is cleared.
+4. Only after the walk, the known files the walk did not see, and those already missing, are the candidates for a move. Each unknown path is read and hashed, in (`root`, `rel_path`) order with the roots ordered by path:
+   - If its hash equals a candidate's, it is that file moved: the file row takes the new path, the track keeps its ID and is updated from the tags, `missing_since` is cleared and the candidate is used up. When several unknown paths share a candidate's hash, the first in that order takes it; when several candidates share a hash, the one stored first is taken.
    - Anything else is a new track.
-5. The candidates left get `missing_since`. Their tracks, playlist entries and plays stay; the field is cleared if the file comes back. `resolve_audio_source` refuses a missing file (below).
+5. The candidates left are missing. Those without `missing_since` get the scan's time; those that already have it keep it. Their tracks, playlist entries and plays stay; the field is cleared if the file comes back. `resolve_audio_source` refuses a missing file (below).
 
-So a copy whose original is still in place is a new track, whichever of the two the walk reaches first, because a file the walk saw is never a candidate.
+So a copy whose original is still in place is a new track, whichever of the two the walk reaches first, because a file the walk saw is never a candidate. A known file the walk saw but could not read keeps its row as it was, and is not a candidate either.
 
-The known limitation: the hash covers the whole file, tags included, so a file that is both moved and retagged between two scans looks like a new track, and the old one is reported missing.
+Each file is written in one transaction: its artist and album (found or added), its track, its `media_file` row and its search rows. A file that cannot be read, such as one that is not audio, is recorded in `errors` with the reason, and the scan goes on; so is a panic while reading it. A database failure ends the scan with an error; what was written before stays.
+
+The content, not the extension, decides how a file is read: Lofty guesses the format from the file's first bytes. The scanner reads MPEG audio, FLAC, Ogg Vorbis, Opus, MP4 and WAV (PCM and floating point), and reports any other format, or a file without an audio stream, as an error.
+
+### Tags and properties
+
+Each changed file's tags are mapped as follows, from the file's primary tag as Lofty names it for the format (such as ID3v2 for MP3, Vorbis comments for FLAC and Ogg, and the `ilst` atom for MP4), or its first tag when it has no primary one:
+
+- The title falls back to the file stem, the artist to "Unknown Artist". Empty or blank tags count as absent. The artist's sort name is the artist sort tag, or the name.
+- The album, track number, disc number and year are copied. A track without an album tag has no album.
+- The album artist is the album artist tag; without one, the track's artist, except on a compilation, which keeps none (below).
+- The compilation flag (`TCMP`, `cpil`, `COMPILATION`) makes the album `AlbumKind::Compilation`. It is set by `1`, any other number but `0`, or `true`.
+- An album found by its key, rather than added, still takes the file's year, when the file has one, and its kind: `compilation` with the flag, `album` without it. A `dj_set` album stays one, because the importer, not the tags, makes it. Of several files on one album, the last one written wins, so files that disagree leave the album as the last changed one says.
+- The codec and `lossless` come from the audio stream, never from the container or the extension (brief §5: do not label lossy audio as lossless): `mp3` (or `mp1`, `mp2`), `vorbis`, `opus` and `aac` are lossy; `flac`, `alac` and `pcm` are lossless. An M4A file is `aac` or `alac`, as its sample description says.
+- The sample rate and channels come from the audio properties, the bitrate from Lofty's audio bitrate (kilobits per second, stored in bits per second), and the duration from Lofty. `has_embedded_art` is set when any tag of the file holds a picture.
+
+An artist or album that a scan, or `remove_root`, leaves without tracks is deleted, with its search row, unless something else still refers to it: an album artist keeps its artist. Otherwise retagging every track of an artist would leave the old name in the artist list for good.
+
+### Known limitations
+
+- The hash covers the whole file, tags included, so a file that is both moved and retagged between two scans looks like a new track, and the old one is reported missing.
+- A file changed without changing its size or modification time, within the file system's clock resolution, looks unchanged.
+- A root that cannot be walked, such as an unmounted drive, reports an error, and its files are marked missing until it is back.
+- Lofty 0.25.5 does not subtract an MP3's encoder delay and padding (the LAME header's gapless fields) or an AAC file's priming samples, so their durations run long by up to about two frames: 32 ms for the 48 kHz MP3 fixture and 21 ms for the 48 kHz AAC one.
+- Nothing stops two scans of the same library from running at once; a path both add fails in one of them.
 
 ## Metadata precedence
 
-In Phase 1 the tags are the only source: each scan of a changed file writes its tags into the track's fields, and nothing else edits them. The scanner's fallbacks (issue #8): the title falls back to the file stem, the artist to "Unknown Artist", and the album artist to the artist except on a compilation (below).
+In Phase 1 the tags are the only source: each scan of a changed file writes its tags into the track's fields, and nothing else edits them. The scanner's fallbacks are under "Tags and properties" above: the title falls back to the file stem, the artist to "Unknown Artist", and the album artist to the artist except on a compilation (below).
 
 Artists and albums are shared records found by key. An artist is the same artist whenever its name is the same ignoring case and surrounding whitespace, and the first spelling stored is kept. An album is the same album whenever its album artist and its title key are the same.
 
@@ -100,7 +136,7 @@ The tables store their own copy of the text, and the storage code keeps it curre
 
 A user's query is split into terms at every character that is not alphanumeric, as the backend contract says, except that a combining mark (general category `Mn`) stays in its word. Each term becomes a quoted FTS5 string with a prefix match, `"term"*`, and FTS5 requires every one of them in some column of the row. So no input is read as FTS5 syntax: `"`, `*`, `-`, `:` and parentheses only separate terms, and `NEAR`, `AND`, `OR` and `NOT` are ordinary words. A query without terms, or whose terms are only marks, finds nothing and runs no SQL.
 
-**Accents.** The backend contract says that search ignores diacritics on Latin letters, and that a precomposed letter (`é`, U+00E9) and the same letter as a base letter and a combining mark (`e` and U+0301) match each other and `e`. The tokenizer does this for the indexed text and for the query alike: with `remove_diacritics 2` it folds `Café`, `Cafe` followed by U+0301, `CAFÉ` and `cafe` to `cafe`, which a test checks against the bundled SQLite. The query terms keep their marks and the tokenizer folds them, rather than the Rust code removing them, so the query and the indexed text are always folded the same way. Folding the query in Rust would differ wherever the tokenizer leaves diacritics alone: it does not fold other scripts (a precomposed Greek `ά` stays `ά`), and the contract leaves those out. Letters without a decomposition, such as `ø`, `ł` and `ß`, are not folded either, as in the in-memory backend, which decomposes text (NFD) and drops the combining marks.
+**Accents.** The backend contract says that search ignores diacritics on Latin letters, and that a precomposed letter (`é`, U+00E9) and the same letter as a base letter and a combining mark (`e` and U+0301) match each other and `e`. The Rust code folds the indexed text and the query terms alike, the same way as the in-memory backend: `fts::fold` decomposes the text (NFD), drops every combining mark (general category `Mn`) and lower-cases what is left. `Café`, `Cafe` followed by U+0301, `CAFÉ` and `ca` followed by U+0305 and `fe` all fold to `cafe`. The `sync_*` functions write the folded text to the FTS tables, and search keeps reading the names it displays from the record tables. `match_query` splits the query into terms first, where a mark does not split a word, then folds each term and drops a term that folding leaves empty. The tokenizer's `remove_diacritics 2` has no marks left to remove; folding in Rust matters because the tokenizer reads some marks, such as the overline U+0305, as separators rather than diacritics, which split `ca` from `fe`. Folding goes beyond the contract's Latin letters: a precomposed Greek `ά` folds to `α` in the index and in the query alike. Letters without a decomposition, such as `ø`, `ł` and `ß`, are not folded. Rows written before folding was added hold the text unfolded; the tokenizer still removes Latin diacritics from them, but a query no longer matches the accented letters it does not fold, such as Greek `ά`, or a word that a mark like U+0305 splits, until the record is written again. No migration rebuilds them.
 
 ## Playing a file
 

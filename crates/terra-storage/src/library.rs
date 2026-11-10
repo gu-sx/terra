@@ -84,8 +84,10 @@ impl LocalLibrary {
     ///
     /// It first reads, without writing, which migrations the database has.
     /// When any is missing it returns [`Error::SchemaOutdated`] and leaves
-    /// the directory as it was: the database file and the absence or content
-    /// of its `-wal` and `-shm` files.
+    /// the database file and its `-wal` file as they were. Without a `-wal`
+    /// file it changes and creates no file. With one, it may create or
+    /// rewrite the `-shm` file: SQLite's shared-memory index of the WAL,
+    /// which reading a WAL needs and which SQLite rebuilds from the WAL.
     ///
     /// # Errors
     ///
@@ -121,13 +123,17 @@ fn existing_database(dir: &Path) -> Result<PathBuf, Error> {
 }
 
 /// Options for a connection that reads a database without changing it or
-/// its directory.
+/// its `-wal` file.
 ///
 /// A read-only connection to a WAL database still creates the `-wal` and
 /// `-shm` files when they do not exist. Without a `-wal` file every
 /// committed page is in the database file, so the connection opens it as
-/// immutable, which creates neither. With one, other connections may have
-/// pages in it that only a WAL reader sees, and both files already exist.
+/// immutable, which changes and creates no file. With one, other
+/// connections may have pages in it that only a WAL reader sees. The reader
+/// leaves the database and `-wal` files unchanged, but may create or
+/// rewrite the `-shm` file, the WAL's shared-memory index, which it needs
+/// and which SQLite rebuilds from the WAL, for example after a writer
+/// crashed.
 fn inspection_options(path: &Path) -> Result<SqliteConnectOptions, Error> {
     let mut wal = path.as_os_str().to_owned();
     wal.push("-wal");

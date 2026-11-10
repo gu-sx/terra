@@ -5,6 +5,8 @@
 //! Its lifecycle is explicit: [`LocalLibrary::create`] makes a library,
 //! [`LocalLibrary::migrate`] brings an older one up to date, and
 //! [`LocalLibrary::open`] opens one that is, without changing its schema.
+//! [`LocalLibrary::add_root`] adds a folder of audio files, and
+//! [`LocalLibrary::scan`] reads the folders into the library.
 //!
 //! `docs/design/library-schema.md` describes the schema.
 
@@ -14,9 +16,8 @@ mod fts;
 mod history;
 mod library;
 mod playlist;
+mod scan;
 mod time;
-// The scanner (issue #8) is the first caller outside the tests.
-#[cfg_attr(not(test), expect(dead_code))]
 mod write;
 
 #[cfg(test)]
@@ -24,3 +25,4 @@ mod tests;
 
 pub use error::{Error, MissingFile};
 pub use library::{DATABASE_FILE, LocalLibrary};
+pub use scan::{ScanProgress, ScanReport};
