@@ -116,7 +116,7 @@ fn gapless_alac() {
 }
 
 #[test]
-#[ignore = "AAC in M4A is not gapless: Symphonia 0.5 ignores the MP4 edit list (follow-up issue: TODO)"]
+#[ignore = "AAC in M4A is not gapless: Symphonia 0.5 ignores the MP4 edit list (#23)"]
 fn gapless_aac() {
     assert_gapless("aac.m4a");
 }

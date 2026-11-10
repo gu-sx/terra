@@ -74,5 +74,5 @@ When two items in a row have different sample rates or channel counts, the deck 
 
 ## Known limits
 
-- AAC in M4A is not gapless and its timeline is 1024 samples early, because Symphonia 0.5 ignores the MP4 edit list (the record's "AAC in M4A" consequence). Its gapless test is skipped until a follow-up fixes it.
+- AAC in M4A is not gapless and its timeline is 1024 samples early, because Symphonia 0.5 ignores the MP4 edit list (the record's "AAC in M4A" consequence). Its gapless test is skipped until #23 fixes it.
 - A seek or a skip while paused takes effect when playback resumes.
