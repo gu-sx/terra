@@ -458,6 +458,36 @@ async fn the_compilation_tag_makes_a_compilation() {
 }
 
 #[tokio::test]
+async fn retagging_an_album_updates_its_year_and_kind() {
+    let setup = Setup::new().await;
+    // With an album artist tag, the retag below keeps the album's key, so
+    // the scan finds the same album rather than making a new one.
+    let path = setup.path("tone-alac.m4a");
+    retag(&path, 0, |tag| {
+        tag.insert_text(ItemKey::AlbumArtist, "Artist C".to_owned());
+    });
+    setup.scan().await;
+    let album = setup.track("Tone ALAC").await.album.unwrap().id;
+
+    retag(&path, 1, |tag| {
+        tag.insert_text(ItemKey::RecordingDate, "2004".to_owned());
+        tag.insert_text(ItemKey::FlagCompilation, "1".to_owned());
+    });
+    assert_eq!(setup.scan().await, report(0, 1, 0, 0, 4));
+
+    let albums = setup
+        .library
+        .list_albums(AlbumFilter::default())
+        .await
+        .unwrap();
+    let retagged = albums.iter().find(|a| a.title == "Album C").unwrap();
+    assert_eq!(retagged.id, album);
+    assert_eq!(retagged.album_artist.name, "Artist C");
+    assert_eq!(retagged.year, Some(2004));
+    assert_eq!(retagged.kind, AlbumKind::Compilation);
+}
+
+#[tokio::test]
 async fn embedded_art_is_recorded() {
     let setup = Setup::new().await;
     retag(&setup.path("Album A/01 tone.mp3"), 0, |tag| {

@@ -19,7 +19,7 @@ use crate::library::LocalLibrary;
 use crate::time::from_nanos;
 use crate::write::{
     NewAlbum, NewFile, NewTrack, RootId, clear_missing, delete_root, ensure_album, ensure_artist,
-    insert_root, insert_track, mark_missing, update_track,
+    insert_root, insert_track, mark_missing, update_album, update_track,
 };
 use read::FileInfo;
 use walk::{Root, Seen};
@@ -313,7 +313,11 @@ impl LocalLibrary {
                     year: tags.year,
                     kind,
                 };
-                Some(ensure_album(&mut tx, &album).await?)
+                let id = ensure_album(&mut tx, &album).await?;
+                // An album found by its key still takes this file's year and
+                // kind, so that a retag reaches it.
+                update_album(&mut tx, id, &album).await?;
+                Some(id)
             }
             None => None,
         };

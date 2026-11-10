@@ -158,6 +158,28 @@ pub(crate) async fn ensure_album(
     Ok(id)
 }
 
+/// Sets an album's year, when `album` has one, and its kind, except that a
+/// DJ set stays one: the importer, not a file's tags, makes an album a DJ
+/// set. The title and album artist are the album's key, and stay.
+pub(crate) async fn update_album(
+    conn: &mut SqliteConnection,
+    id: AlbumId,
+    album: &NewAlbum<'_>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE album
+         SET year = IFNULL(?2, year),
+             kind = CASE WHEN kind = 'dj_set' THEN kind ELSE ?3 END
+         WHERE id = ?1",
+    )
+    .bind(id.get())
+    .bind(album.year)
+    .bind(album_kind_text(album.kind))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Adds a track and its file, and indexes it for search.
 pub(crate) async fn insert_track(
     conn: &mut SqliteConnection,

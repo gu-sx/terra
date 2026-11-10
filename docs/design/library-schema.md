@@ -92,6 +92,7 @@ Each changed file's tags are mapped as follows, from the file's primary tag as L
 - The album, track number, disc number and year are copied. A track without an album tag has no album.
 - The album artist is the album artist tag; without one, the track's artist, except on a compilation, which keeps none (below).
 - The compilation flag (`TCMP`, `cpil`, `COMPILATION`) makes the album `AlbumKind::Compilation`. It is set by `1`, any other number but `0`, or `true`.
+- An album found by its key, rather than added, still takes the file's year, when the file has one, and its kind: `compilation` with the flag, `album` without it. A `dj_set` album stays one, because the importer, not the tags, makes it. Of several files on one album, the last one written wins, so files that disagree leave the album as the last changed one says.
 - The codec and `lossless` come from the audio stream, never from the container or the extension (brief §5: do not label lossy audio as lossless): `mp3` (or `mp1`, `mp2`), `vorbis`, `opus` and `aac` are lossy; `flac`, `alac` and `pcm` are lossless. An M4A file is `aac` or `alac`, as its sample description says.
 - The sample rate and channels come from the audio properties, the bitrate from Lofty's audio bitrate (kilobits per second, stored in bits per second), and the duration from Lofty. `has_embedded_art` is set when any tag of the file holds a picture.
 
@@ -101,7 +102,6 @@ An artist or album that a scan, or `remove_root`, leaves without tracks is delet
 
 - The hash covers the whole file, tags included, so a file that is both moved and retagged between two scans looks like a new track, and the old one is reported missing.
 - A file changed without changing its size or modification time, within the file system's clock resolution, looks unchanged.
-- An existing album keeps its year and kind: they come from the first file that created it.
 - A root that cannot be walked, such as an unmounted drive, reports an error, and its files are marked missing until it is back.
 - Lofty 0.25.5 does not subtract an MP3's encoder delay and padding (the LAME header's gapless fields) or an AAC file's priming samples, so their durations run long by up to about two frames: 32 ms for the 48 kHz MP3 fixture and 21 ms for the 48 kHz AAC one.
 - Nothing stops two scans of the same library from running at once; a path both add fails in one of them.
