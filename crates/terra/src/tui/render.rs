@@ -1,5 +1,5 @@
 //! Draws the state: a header, the sidebar and the main list, the bottom bar
-//! and, when open, the help overlay.
+//! and, when open, the playlist picker or the help overlay.
 
 use std::time::Duration;
 
@@ -8,9 +8,11 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table};
+use terra_core::PlaylistEntry;
 
 use super::app::{App, Browse, Focus, Item, Load, View, visible_offset};
 use super::keymap::{Binding, Context, KEYMAP};
+use super::playlist::{Modal, Picker};
 
 const HEADER_HEIGHT: u16 = 3;
 const FOOTER_HEIGHT: u16 = 5;
@@ -19,6 +21,9 @@ const SIDEBAR_WIDTH: u16 = 22;
 const TIME_WIDTH: u16 = 7;
 /// The width of the help overlay's key column.
 const HELP_KEYS_WIDTH: usize = 14;
+const PICKER_WIDTH: u16 = 50;
+/// The most playlists the picker shows at once.
+const PICKER_ROWS: usize = 10;
 
 const ACCENT: Color = Color::Cyan;
 
@@ -61,6 +66,9 @@ pub fn render(app: &App, frame: &mut Frame) {
     render_sidebar(app, frame, areas.sidebar);
     render_list(app, frame, areas.list);
     render_footer(app, frame, areas.footer);
+    if let Some(Modal::Picker(picker)) = &app.modal {
+        render_picker(app, picker, frame, frame.area());
+    }
     if app.help {
         render_help(frame, frame.area());
     }
@@ -163,7 +171,7 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
         lines.push(entry(
             index,
             browse.label().to_owned(),
-            browse == app.browse,
+            browse.view() == app.root_view(),
         ));
     }
     lines.push(Line::default());
@@ -180,7 +188,8 @@ fn render_sidebar(app: &App, frame: &mut Frame, area: Rect) {
                 if app.sidebar == index {
                     cursor_line = lines.len();
                 }
-                lines.push(entry(index, playlist.name.clone(), false));
+                let active = View::Playlist(playlist.id) == app.root_view();
+                lines.push(entry(index, playlist.name.clone(), active));
             }
         }
     }
@@ -197,7 +206,7 @@ fn columns(app: &App) -> (&'static str, &'static str) {
         return ("RESULT", "");
     }
     match app.top().view {
-        View::Tracks(_) => ("TITLE / ARTIST", "TIME"),
+        View::Tracks(_) | View::Playlist(_) => ("TITLE / ARTIST", "TIME"),
         View::Artists => ("ARTIST", ""),
         View::Albums(_) | View::ArtistAlbums(_) => ("ALBUM / ARTIST", "YEAR"),
     }
@@ -221,7 +230,7 @@ fn item_cells(item: &Item, searching: bool) -> (String, String) {
                 right,
             )
         }
-        Item::Track(track) => (
+        Item::Track(track) | Item::Entry(PlaylistEntry { track, .. }) => (
             format!("{} / {}", track.title, track.artist.name),
             format_duration(track.duration),
         ),
@@ -316,17 +325,94 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(bar).fg(Color::DarkGray), progress);
 
     let context = Context::of(app);
-    if let Some(search) = app.editing_search() {
-        let prompt = Line::from(vec![
-            Span::styled("/", Style::new().fg(ACCENT).bold()),
-            Span::raw(search.query.clone()),
-            Span::styled("█", Style::new().fg(ACCENT)),
-        ]);
+    let prompt = match (&app.modal, app.editing_search()) {
+        (Some(Modal::Name { renaming, text }), _) => {
+            let label = match renaming {
+                Some(playlist) => format!("Rename “{}”: ", playlist.name),
+                None => "New playlist: ".to_owned(),
+            };
+            Some(text_prompt(label, text))
+        }
+        (Some(Modal::Delete(playlist)), _) => Some(Line::from(vec![
+            Span::styled("Delete ", Style::new().fg(ACCENT).bold()),
+            Span::raw(format!("“{}”?", playlist.name)),
+        ])),
+        (Some(Modal::Picker(_)), _) => None,
+        (None, Some(search)) => Some(text_prompt("/".to_owned(), &search.query)),
+        (None, None) => None,
+    };
+    if let Some(prompt) = prompt {
         frame.render_widget(Paragraph::new(prompt), hints);
         frame.render_widget(Paragraph::new(hint_line(context).right_aligned()), hints);
+    } else if let Some(status) = &app.status {
+        let style = if status.error {
+            Style::new().fg(Color::Red)
+        } else {
+            Style::new()
+        };
+        frame.render_widget(Paragraph::new(status.text.clone()).style(style), hints);
     } else {
         frame.render_widget(Paragraph::new(hint_line(context)), hints);
     }
+}
+
+/// A label, the text typed after it and a cursor.
+fn text_prompt(label: String, text: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(label, Style::new().fg(ACCENT).bold()),
+        Span::raw(text.to_owned()),
+        Span::styled("█", Style::new().fg(ACCENT)),
+    ])
+}
+
+/// The playlist picker: its filter, then the playlists that match it.
+fn render_picker(app: &App, picker: &Picker, frame: &mut Frame, area: Rect) {
+    // The picker keeps its size while the filter narrows it.
+    let shown = app.playlist_list().len().clamp(1, PICKER_ROWS);
+    let matches = picker.matches(app.playlist_list());
+    let height = u16::try_from(shown + 3).unwrap_or(u16::MAX);
+    let popup = centered(area, PICKER_WIDTH, height);
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(Style::new().fg(ACCENT))
+        .title(format!(" Add “{}” to ", picker.track.title));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let [query_area, rows_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(text_prompt("› ".to_owned(), &picker.query)),
+        query_area,
+    );
+
+    if matches.is_empty() {
+        let text = if picker.query.is_empty() {
+            "  No playlists".to_owned()
+        } else {
+            format!("  No playlists match “{}”", picker.query)
+        };
+        frame.render_widget(Paragraph::new(text).dim(), rows_area);
+        return;
+    }
+    let height = usize::from(rows_area.height);
+    let offset = visible_offset(picker.selected, 0, height);
+    let lines: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(index, playlist)| {
+            let selected = index == picker.selected;
+            let line = Line::from(format!("{}{}", marker(selected), playlist.name));
+            if selected {
+                line.style(selected_style(true))
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), rows_area);
 }
 
 /// The key hints of the bindings in `context` that have one.
@@ -358,9 +444,16 @@ pub fn help_line(binding: &Binding) -> String {
 fn render_help(frame: &mut Frame, area: Rect) {
     let section = |context: Context| {
         let mut lines = vec![Line::from(context.title()).fg(ACCENT).bold()];
-        if context == Context::Search {
-            let typing = format!("{:<HELP_KEYS_WIDTH$} Add to the query", "(type)");
-            lines.push(Line::from(typing));
+        let typing = match context {
+            Context::Search => Some("Add to the query"),
+            Context::Prompt => Some("Add to the text"),
+            Context::Browse | Context::Confirm | Context::Help => None,
+        };
+        if let Some(typing) = typing {
+            lines.push(Line::from(format!(
+                "{:<HELP_KEYS_WIDTH$} {typing}",
+                "(type)"
+            )));
         }
         lines.extend(
             KEYMAP
@@ -370,7 +463,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         );
         lines
     };
-    let [first, rest @ ..] = Context::ALL;
+    // The overlay's own keys go on its bottom border, under the left column.
+    let [first, rest @ .., help] = Context::ALL;
     let left = section(first);
     let mut right = Vec::new();
     for context in rest {
@@ -382,10 +476,13 @@ fn render_help(frame: &mut Frame, area: Rect) {
 
     let rows = u16::try_from(left.len().max(right.len())).unwrap_or(u16::MAX);
     let popup = centered(area, 78, rows.saturating_add(2));
-    let block = Block::bordered()
+    let mut block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(Style::new().fg(ACCENT))
-        .title(" Help ");
+        .title(format!(" {} ", help.title()));
+    for binding in KEYMAP.iter().filter(|binding| binding.context == help) {
+        block = block.title_bottom(help_line(binding));
+    }
     let inner = block.inner(popup);
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);

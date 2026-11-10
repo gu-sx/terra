@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use terra_core::{AlbumFilter, LibraryBackend, LibraryError, Page, TrackFilter};
 
 use super::app::{Item, Payload, Request, Response, View};
+use super::playlist::Edit;
 
 /// How many results a search asks for in each category.
 pub const SEARCH_LIMIT: usize = 200;
@@ -20,7 +21,10 @@ pub async fn fetch<B: LibraryBackend>(backend: &B, request: Request) -> Response
 
 async fn load<B: LibraryBackend>(backend: &B, request: &Request) -> Result<Payload, LibraryError> {
     let items = match request {
-        Request::Playlists => return backend.list_playlists().await.map(Payload::Playlists),
+        Request::Playlists { .. } => {
+            return backend.list_playlists().await.map(Payload::Playlists);
+        }
+        Request::Edit(edit) => return run_edit(backend, edit).await,
         Request::Screen { view, .. } => load_view(backend, *view).await?,
         Request::Search { query, .. } => {
             let results = backend.search(query, SEARCH_LIMIT).await?;
@@ -31,6 +35,33 @@ async fn load<B: LibraryBackend>(backend: &B, request: &Request) -> Result<Paylo
         }
     };
     Ok(Payload::Items(items))
+}
+
+async fn run_edit<B: LibraryBackend>(backend: &B, edit: &Edit) -> Result<Payload, LibraryError> {
+    match edit {
+        Edit::Create(name) => return backend.create_playlist(name).await.map(Payload::Playlist),
+        Edit::Rename(id, name) => {
+            return backend
+                .rename_playlist(*id, name)
+                .await
+                .map(Payload::Playlist);
+        }
+        Edit::Delete(playlist) => backend.delete_playlist(playlist.id).await?,
+        Edit::Add { playlist, track } => {
+            backend
+                .add_to_playlist(playlist.id, &[track.id], None)
+                .await?;
+        }
+        Edit::Remove { playlist, entry } => {
+            backend.remove_from_playlist(*playlist, &[*entry]).await?;
+        }
+        Edit::Move {
+            playlist,
+            entry,
+            to,
+        } => backend.move_playlist_entry(*playlist, *entry, *to).await?,
+    }
+    Ok(Payload::Done)
 }
 
 async fn load_view<B: LibraryBackend>(backend: &B, view: View) -> Result<Vec<Item>, LibraryError> {
@@ -64,6 +95,10 @@ async fn load_view<B: LibraryBackend>(backend: &B, view: View) -> Result<Vec<Ite
                 .filter(|album| album.album_artist.id == artist || appears_on.contains(&album.id))
                 .map(Item::Album)
                 .collect()
+        }
+        View::Playlist(id) => {
+            let contents = backend.get_playlist(id).await?;
+            contents.entries.into_iter().map(Item::Entry).collect()
         }
     })
 }

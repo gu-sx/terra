@@ -7,8 +7,14 @@
 //! A response whose screen or search is gone by the time it arrives is
 //! dropped, so a slow backend never overwrites a newer list.
 
-use terra_core::{Album, AlbumFilter, AlbumKind, Artist, ArtistId, Playlist, Track, TrackFilter};
+use std::collections::VecDeque;
 
+use terra_core::{
+    Album, AlbumFilter, AlbumKind, Artist, ArtistId, Playlist, PlaylistEntry, PlaylistId, Track,
+    TrackFilter,
+};
+
+use super::playlist::{Edit, Modal};
 use super::render;
 
 /// Which pane has the keyboard.
@@ -40,7 +46,7 @@ impl Browse {
         }
     }
 
-    fn view(self) -> View {
+    pub fn view(self) -> View {
         match self {
             Self::AllTracks => View::Tracks(TrackFilter::default()),
             Self::Artists => View::Artists,
@@ -65,6 +71,8 @@ pub enum View {
     /// The albums of an artist: those it is the album artist of, and those
     /// it has a track on.
     ArtistAlbums(ArtistId),
+    /// The entries of a playlist.
+    Playlist(PlaylistId),
 }
 
 /// One row of the main list.
@@ -73,6 +81,18 @@ pub enum Item {
     Artist(Artist),
     Album(Album),
     Track(Track),
+    Entry(PlaylistEntry),
+}
+
+impl Item {
+    /// The track the row is or holds.
+    pub fn track(&self) -> Option<&Track> {
+        match self {
+            Self::Track(track) => Some(track),
+            Self::Entry(entry) => Some(&entry.track),
+            Self::Artist(_) | Self::Album(_) => None,
+        }
+    }
 }
 
 /// Data that the backend is still loading, has loaded, or failed to load.
@@ -94,7 +114,7 @@ pub struct Cursor {
 impl Cursor {
     /// Moves the selection to `to`, kept within `len` rows, and scrolls so
     /// that it stays within the `height` rows shown.
-    fn select(&mut self, to: usize, len: usize, height: usize) {
+    pub(super) fn select(&mut self, to: usize, len: usize, height: usize) {
         self.selected = to.min(len.saturating_sub(1));
         self.offset = visible_offset(self.selected, self.offset, height);
     }
@@ -122,6 +142,9 @@ pub struct Screen {
     /// The name the header shows for this level.
     pub title: String,
     pub view: View,
+    /// Identifies the latest load of the rows, so that only its response
+    /// counts.
+    pub load: u64,
     pub rows: Load<Vec<Item>>,
     pub cursor: Cursor,
     pub search: Option<Search>,
@@ -181,6 +204,24 @@ pub enum Action {
     ConfirmSearch,
     ClearSearch,
     ToggleHelp,
+    /// Asks for the name of a new playlist.
+    NewPlaylist,
+    /// Asks for a new name for the selected or open playlist.
+    RenamePlaylist,
+    /// Asks whether to delete the selected or open playlist.
+    DeletePlaylist,
+    /// Opens the picker of the playlist to add the selected track to.
+    AddToPlaylist,
+    /// Removes the selected entry from the open playlist.
+    RemoveEntry,
+    MoveEntryDown,
+    MoveEntryUp,
+    /// Types into the name prompt or the picker's filter.
+    PromptInput(char),
+    PromptDeleteChar,
+    /// Accepts the prompt: the name, the deletion or the picked playlist.
+    PromptConfirm,
+    PromptCancel,
     Quit,
     /// The terminal has this many columns and rows.
     Resize {
@@ -192,9 +233,12 @@ pub enum Action {
 /// Data the state needs from the backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    Playlists,
+    Playlists {
+        load: u64,
+    },
     Screen {
         id: ScreenId,
+        load: u64,
         view: View,
     },
     Search {
@@ -202,6 +246,7 @@ pub enum Request {
         seq: u64,
         query: String,
     },
+    Edit(Edit),
 }
 
 /// What the backend returned for a request.
@@ -209,6 +254,17 @@ pub enum Request {
 pub enum Payload {
     Playlists(Vec<Playlist>),
     Items(Vec<Item>),
+    /// The playlist an edit created or renamed.
+    Playlist(Playlist),
+    /// An edit that returns nothing succeeded.
+    Done,
+}
+
+/// A message for the status line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Status {
+    pub text: String,
+    pub error: bool,
 }
 
 /// A request and its result.
@@ -224,19 +280,27 @@ pub struct App {
     /// Names the library the TUI is connected to.
     pub library: String,
     pub focus: Focus,
-    /// The BROWSE entry the main list descends from.
-    pub browse: Browse,
     /// The selected sidebar entry: the BROWSE entries, then the playlists.
     pub sidebar: usize,
     pub playlists: Load<Vec<Playlist>>,
-    /// The drill-down, from the BROWSE entry's screen. Never empty.
+    /// Identifies the latest load of the playlists.
+    pub(super) playlists_load: u64,
+    /// The drill-down, from the screen of the sidebar entry that was opened.
+    /// Never empty.
     pub stack: Vec<Screen>,
+    /// The prompt that has the keyboard, if any.
+    pub modal: Option<Modal>,
+    /// The edits not yet done, in order. The first is running.
+    pub(super) edits: VecDeque<Edit>,
+    /// The result of the last edit, until the next key.
+    pub status: Option<Status>,
     pub help: bool,
     pub quit: bool,
     /// How many rows of the main list fit on the terminal.
     pub list_height: usize,
     next_screen: ScreenId,
-    next_search: u64,
+    /// Numbers searches and loads. Unique across the session.
+    next_seq: u64,
 }
 
 impl App {
@@ -246,15 +310,18 @@ impl App {
         let mut app = Self {
             library: library.into(),
             focus: Focus::List,
-            browse: Browse::AllTracks,
             sidebar: 0,
             playlists: Load::Loading,
+            playlists_load: 0,
             stack: Vec::new(),
+            modal: None,
+            edits: VecDeque::new(),
+            status: None,
             help: false,
             quit: false,
             list_height: 0,
             next_screen: 0,
-            next_search: 0,
+            next_seq: 0,
         };
         let root = app.screen(Browse::AllTracks.label(), Browse::AllTracks.view());
         app.stack.push(root);
@@ -266,7 +333,12 @@ impl App {
         self.stack.last().expect("the stack is never empty")
     }
 
-    fn top_mut(&mut self) -> &mut Screen {
+    /// The view of the sidebar entry the main list descends from.
+    pub fn root_view(&self) -> View {
+        self.stack[0].view
+    }
+
+    pub(super) fn top_mut(&mut self) -> &mut Screen {
         self.stack.last_mut().expect("the stack is never empty")
     }
 
@@ -341,10 +413,21 @@ impl App {
     }
 
     fn playlist_count(&self) -> usize {
+        self.playlist_list().len()
+    }
+
+    /// The playlists, or none while they are not loaded.
+    pub fn playlist_list(&self) -> &[Playlist] {
         match &self.playlists {
-            Load::Ready(playlists) => playlists.len(),
-            Load::Loading | Load::Failed(_) => 0,
+            Load::Ready(playlists) => playlists,
+            Load::Loading | Load::Failed(_) => &[],
         }
+    }
+
+    /// A new number for a search or a load.
+    pub(super) fn seq(&mut self) -> u64 {
+        self.next_seq += 1;
+        self.next_seq
     }
 
     fn screen(&mut self, title: impl Into<String>, view: View) -> Screen {
@@ -354,6 +437,7 @@ impl App {
             id,
             title: title.into(),
             view,
+            load: self.seq(),
             rows: Load::Loading,
             cursor: Cursor::default(),
             search: None,
@@ -361,10 +445,11 @@ impl App {
     }
 
     /// Puts a new screen on top of the stack and asks for its rows.
-    fn push(&mut self, title: impl Into<String>, view: View) -> Request {
+    pub(super) fn push(&mut self, title: impl Into<String>, view: View) -> Request {
         let screen = self.screen(title, view);
         let request = Request::Screen {
             id: screen.id,
+            load: screen.load,
             view,
         };
         self.stack.push(screen);
@@ -378,6 +463,13 @@ impl App {
     /// Moves the focused pane's selection with `to`, which gets the current
     /// selection and the length of the list.
     fn move_selection(&mut self, to: impl FnOnce(usize, usize) -> usize) {
+        if let Some(Modal::Picker(picker)) = &self.modal {
+            let len = picker.matches(self.playlist_list()).len();
+            if let Some(Modal::Picker(picker)) = &mut self.modal {
+                picker.selected = to(picker.selected, len).min(len.saturating_sub(1));
+            }
+            return;
+        }
         match self.focus {
             Focus::Sidebar => {
                 let len = self.sidebar_len();
@@ -395,13 +487,15 @@ impl App {
     fn open(&mut self) -> Vec<Request> {
         match self.focus {
             Focus::Sidebar => {
-                let Some(&browse) = Browse::ALL.get(self.sidebar) else {
-                    // Opening a playlist comes with the playlist views.
-                    return Vec::new();
+                let (title, view) = match Browse::ALL.get(self.sidebar) {
+                    Some(browse) => (browse.label().to_owned(), browse.view()),
+                    None => match self.sidebar_playlist() {
+                        Some(playlist) => (playlist.name.clone(), View::Playlist(playlist.id)),
+                        None => return Vec::new(),
+                    },
                 };
-                self.browse = browse;
                 self.stack.clear();
-                let request = self.push(browse.label(), browse.view());
+                let request = self.push(title, view);
                 self.focus = Focus::List;
                 vec![request]
             }
@@ -420,7 +514,7 @@ impl App {
                         self.push(title, view)
                     }
                     // Playing a track comes with playback.
-                    Some(Item::Track(_)) | None => return Vec::new(),
+                    Some(Item::Track(_) | Item::Entry(_)) | None => return Vec::new(),
                 };
                 let parent = self.stack.len() - 2;
                 if let Some(search) = &mut self.stack[parent].search {
@@ -456,8 +550,7 @@ impl App {
 
     /// Changes the query being typed and asks for its results.
     fn edit_query(&mut self, edit: impl FnOnce(&mut String)) -> Vec<Request> {
-        self.next_search += 1;
-        let seq = self.next_search;
+        let seq = self.seq();
         let top = self.top_mut();
         let screen = top.id;
         let Some(search) = top.search.as_mut().filter(|search| search.editing) else {
@@ -490,13 +583,19 @@ impl App {
 /// Applies an action to the state and returns the data it needs loaded.
 pub fn update(app: &mut App, action: Action) -> Vec<Request> {
     let half_page = app.half_page();
+    if !matches!(action, Action::Start | Action::Resize { .. }) {
+        app.status = None;
+    }
     match action {
         Action::Start => {
             let top = app.top();
             return vec![
-                Request::Playlists,
+                Request::Playlists {
+                    load: app.playlists_load,
+                },
                 Request::Screen {
                     id: top.id,
+                    load: top.load,
                     view: top.view,
                 },
             ];
@@ -527,6 +626,19 @@ pub fn update(app: &mut App, action: Action) -> Vec<Request> {
         Action::ConfirmSearch => app.confirm_search(),
         Action::ClearSearch => app.top_mut().search = None,
         Action::ToggleHelp => app.help = !app.help,
+        Action::NewPlaylist => app.new_playlist(),
+        Action::RenamePlaylist => app.rename_playlist(),
+        Action::DeletePlaylist => app.delete_playlist(),
+        Action::AddToPlaylist => app.pick_playlist(),
+        Action::RemoveEntry => return app.remove_entry(),
+        Action::MoveEntryDown => return app.move_entry(true),
+        Action::MoveEntryUp => return app.move_entry(false),
+        Action::PromptInput(c) => app.edit_prompt(|text| text.push(c)),
+        Action::PromptDeleteChar => app.edit_prompt(|text| {
+            text.pop();
+        }),
+        Action::PromptConfirm => return app.confirm_prompt(),
+        Action::PromptCancel => app.modal = None,
         Action::Quit => app.quit = true,
         Action::Resize { width, height } => {
             app.list_height = render::list_height(width, height);
@@ -542,27 +654,52 @@ pub fn update(app: &mut App, action: Action) -> Vec<Request> {
     Vec::new()
 }
 
-/// Stores what the backend returned, unless its screen or search is gone.
-pub fn receive(app: &mut App, response: Response) {
+/// Stores what the backend returned, unless its screen, search or load is
+/// gone, and returns the data that the result makes stale.
+pub fn receive(app: &mut App, response: Response) -> Vec<Request> {
     let Response { request, result } = response;
     let to_rows = |result: Result<Payload, String>| match result {
         Ok(Payload::Items(items)) => Load::Ready(items),
-        Ok(Payload::Playlists(_)) => Load::Failed("unexpected playlists".to_owned()),
+        Ok(_) => Load::Failed("unexpected response".to_owned()),
         Err(error) => Load::Failed(error),
     };
     match request {
-        Request::Playlists => {
+        Request::Playlists { load } => {
+            // While edits are outstanding the playlists may be about to
+            // change; they load again after the last edit.
+            if load != app.playlists_load || !app.edits.is_empty() {
+                return Vec::new();
+            }
             app.playlists = match result {
                 Ok(Payload::Playlists(playlists)) => Load::Ready(playlists),
-                Ok(Payload::Items(_)) => Load::Failed("unexpected items".to_owned()),
+                Ok(_) => Load::Failed("unexpected response".to_owned()),
                 Err(error) => Load::Failed(error),
             };
             app.sidebar = app.sidebar.min(app.sidebar_len() - 1);
         }
-        Request::Screen { id, .. } => {
-            if let Some(screen) = app.stack.iter_mut().find(|screen| screen.id == id) {
+        Request::Screen { id, load, view } => {
+            if matches!(view, View::Playlist(_)) && !app.edits.is_empty() {
+                return Vec::new();
+            }
+            let height = app.list_height;
+            let screen = app
+                .stack
+                .iter_mut()
+                .find(|screen| screen.id == id && screen.load == load);
+            if let Some(screen) = screen {
+                // A reload keeps the selection where it was.
+                let reload = matches!(screen.rows, Load::Ready(_));
                 screen.rows = to_rows(result);
-                screen.cursor = Cursor::default();
+                if reload {
+                    let len = match &screen.rows {
+                        Load::Ready(items) => items.len(),
+                        Load::Loading | Load::Failed(_) => 0,
+                    };
+                    let selected = screen.cursor.selected;
+                    screen.cursor.select(selected, len, height);
+                } else {
+                    screen.cursor = Cursor::default();
+                }
             }
         }
         Request::Search { screen, seq, .. } => {
@@ -577,5 +714,7 @@ pub fn receive(app: &mut App, response: Response) {
                 search.cursor = Cursor::default();
             }
         }
+        Request::Edit(edit) => return app.finish_edit(&edit, result),
     }
+    Vec::new()
 }
