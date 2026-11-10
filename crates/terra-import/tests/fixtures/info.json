@@ -1,0 +1,17 @@
+{
+  "id": "example0001",
+  "title": "Synthetic Set",
+  "uploader": "Uploader A",
+  "webpage_url": "https://example.com/watch?v=example0001",
+  "extractor": "generic",
+  "duration": 1800.0,
+  "description": "00:00 Artist A - Opening Track\n05:42 Artist B - Midnight",
+  "chapters": [
+    {"start_time": 0.0, "end_time": 342.0, "title": "Artist A - Opening Track"},
+    {"start_time": 342.0, "end_time": 678.0, "title": "Artist B – Midnight"},
+    {"start_time": 678.0, "end_time": 1073.5, "title": "Artist C — After Hours"},
+    {"start_time": 1073.5, "end_time": 1447.0, "title": "<Untitled Chapter 4>"},
+    {"start_time": 1447, "end_time": 1800, "title": "Artist E - Closing"}
+  ],
+  "ext": "webm"
+}
