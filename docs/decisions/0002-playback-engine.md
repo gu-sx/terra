@@ -151,9 +151,9 @@ Commands: `proto device-rodio` (the default build) and `proto-pw device-rodio` (
 
 #### 6. Player features
 
-Commands: `proto features-rodio`, `proto features-mpv`, `proto features-libmpv`. Rodio is measured by pulling samples without a device; mpv in real time with `--ao=null`.
+Commands: `proto features-rodio`, `proto features-mpv`, `proto features-libmpv` and `proto volume-mpv`. Rodio is measured by pulling samples without a device; mpv in real time with `--ao=null`, except `volume-mpv`, which captures PCM.
 
-- **Volume.** Rodio's `Player::set_volume(0.25)` scales samples linearly (peak 0.5 became 0.1250), and the last full-volume sample came 237 samples after the call: the factor is applied on the next 5 ms control tick, as a step without a ramp. mpv's `volume` property is cubic: `--volume=25` scaled the peak from 0.5 to 0.00781, a factor of 0.0156 = 0.25³.
+- **Volume.** Rodio's `Player::set_volume(0.25)` scales samples linearly (peak 0.5 became 0.1250), and the last full-volume sample came 237 samples after the call: the factor is applied on the next 5 ms control tick, as a step without a ramp. mpv's `volume` property is cubic: `proto volume-mpv` plays the tone with `--volume=25` through `--ao=pcm`, and the peak fell from 0.5 to 0.00781, a factor of 0.01562 = 0.25³.
 - **Position.** Rodio's `get_pos()` matched the samples pulled to within 4 ms, the phase of its 5 ms update tick. mpv's `time-pos`, polled every 10 ms, changed 251 times in 19.6 s, about every 80 ms, and lagged the wall clock by a median of 38 ms.
 - **End of track.** In Rodio, an `EmptyCallback` source appended after a track ran after exactly 480 517 samples had been pulled, the length of the track. This is when the device pulls the last sample, one device buffer before it is heard (2048 frames, 42.7 ms here). mpv sent `end-file` (reason `eof`) for the first track, `start-file` for the second and the `playlist-pos` change all at 9.540 s, while the first track lasts 10.011 s. From 9.553 s to 10.047 s it reported the second track at `time-pos` 0.000, while the last 0.47 s of the first track was still playing. With gapless playback, mpv moves to the next file when the decoder reaches the end, not when the audio does. On the real PipeWire device at volume 0 (`proto features-mpv fixtures pipewire`), `end-file` came at 9.745 s, the second track was reported at `time-pos` 0 from 9.758 s to 10.086 s, and `time-pos` lagged the wall clock by a median of 88 ms. libmpv gave the same times as the subprocess, to the millisecond.
 
@@ -357,6 +357,7 @@ $p seek-libmpv fixtures > results/seek-libmpv.txt 2>&1
 $p features-rodio fixtures > results/features-rodio.txt 2>&1
 $p features-mpv fixtures > results/features-mpv.txt 2>&1
 $p features-libmpv fixtures > results/features-libmpv.txt 2>&1
+$p volume-mpv fixtures > results/volume-mpv.txt 2>&1
 SPIKE_HTTP_RATE=4000000 SPIKE_HTTP_LOG=1 $p http fixtures > results/http.txt 2>&1
 $p device-rodio > results/device-rodio.txt 2>&1
 ./proto-pw device-rodio > results/device-rodio-pw.txt 2>&1
@@ -434,6 +435,7 @@ fn main() {
         Some("features-rodio") => features_rodio(dir),
         Some("features-mpv") => features_mpv(dir, args.get(3).map(String::as_str)),
         Some("features-libmpv") => features_libmpv(dir),
+        Some("volume-mpv") => volume_mpv(dir),
         Some("device-rodio") => device_rodio(),
         _ => eprintln!("usage: proto <command> <fixtures dir> [args]"),
     }
@@ -901,6 +903,18 @@ fn features_rodio(dir: &str) {
         "rodio end-of-track callback after {} samples pulled (track length {})",
         ended_at.load(Ordering::SeqCst),
         analysis::SPLIT
+    );
+}
+
+/// mpv's volume curve: the peak of the 0.5-amplitude tone at --volume=25,
+/// captured as PCM, skipping the first 0.1 s.
+fn volume_mpv(dir: &str) {
+    let y = mpv_pcm(&[path(dir, "a.flac")], &["--volume=25", "--length=1"]);
+    let peak = y[4800..].iter().fold(0.0_f32, |m, v| m.max(v.abs()));
+    println!(
+        "mpv --volume=25: peak {peak:.5} of 0.5, factor {:.5} (0.25^3 = {:.5})",
+        peak / 0.5,
+        0.25_f32.powi(3)
     );
 }
 
