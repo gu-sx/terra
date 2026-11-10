@@ -1,0 +1,18 @@
+[package]
+name = "terra-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Domain types and the library backend trait, with no I/O and no async runtime"
+
+[features]
+# The in-memory backend, the sample library and the backend contract suite.
+testing = []
+
+[dependencies]
+url = "2.5.8"
+
+[[test]]
+name = "memory_contract"
+required-features = ["testing"]
