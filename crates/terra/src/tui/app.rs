@@ -665,7 +665,9 @@ pub fn receive(app: &mut App, response: Response) -> Vec<Request> {
     };
     match request {
         Request::Playlists { load } => {
-            if load != app.playlists_load {
+            // While edits are outstanding the playlists may be about to
+            // change; they load again after the last edit.
+            if load != app.playlists_load || !app.edits.is_empty() {
                 return Vec::new();
             }
             app.playlists = match result {
@@ -675,7 +677,10 @@ pub fn receive(app: &mut App, response: Response) -> Vec<Request> {
             };
             app.sidebar = app.sidebar.min(app.sidebar_len() - 1);
         }
-        Request::Screen { id, load, .. } => {
+        Request::Screen { id, load, view } => {
+            if matches!(view, View::Playlist(_)) && !app.edits.is_empty() {
+                return Vec::new();
+            }
             let height = app.list_height;
             let screen = app
                 .stack

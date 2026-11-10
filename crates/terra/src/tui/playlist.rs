@@ -4,8 +4,9 @@
 //! An edit goes to the backend as a [`Request::Edit`]. Edits run one at a
 //! time, in the order they were made, so that a fast sequence of moves
 //! reaches the backend as it was typed. Removing and moving an entry show at
-//! once; while edits are outstanding, loads of the playlists are dropped, and
-//! once the last edit is done the playlists and every open playlist load
+//! once; while edits are outstanding, loads of the playlists and of every
+//! playlist view are dropped, so a playlist opened meanwhile stays loading,
+//! and once the last edit is done the playlists and every open playlist load
 //! again.
 
 use terra_core::{Playlist, PlaylistEntryId, PlaylistId, Track};
@@ -240,8 +241,6 @@ impl App {
 
     /// Queues an edit, and starts it unless another is running.
     fn enqueue(&mut self, edit: Edit) -> Vec<Request> {
-        // Loads already on their way may miss this edit.
-        self.reload_playlists();
         self.edits.push_back(edit);
         match self.edits.len() {
             1 => vec![Request::Edit(self.edits[0].clone())],

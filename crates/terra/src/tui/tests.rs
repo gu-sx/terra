@@ -1045,3 +1045,24 @@ fn the_playlist_keys_are_in_the_keymap() {
     );
     assert_eq!(keymap::action_for_key(Context::Confirm, key('x')), None);
 }
+
+#[test]
+fn a_playlist_opened_during_an_edit_waits_for_it() {
+    let mut harness = Harness::playlists();
+    harness.open_playlist(0);
+    let removal = update(&mut harness.app, Action::RemoveEntry);
+    // Open the playlist again before the removal is done. Its rows, read
+    // before the removal, are dropped, so nothing can be edited on them.
+    harness.type_text("h");
+    for request in update(&mut harness.app, Action::Open) {
+        let response = block_on(fetch(&harness.library, request));
+        assert!(receive(&mut harness.app, response).is_empty());
+    }
+    assert_eq!(harness.app.rows(), &Load::Loading);
+    assert!(update(&mut harness.app, Action::MoveEntryDown).is_empty());
+
+    harness.answer(removal);
+    assert_eq!(harness.names(), ["Sunrise", "Last Light"]);
+    harness.type_text("J");
+    assert_eq!(harness.stored()[0].1, ["Last Light", "Sunrise"]);
+}
