@@ -21,7 +21,7 @@ use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
@@ -56,12 +56,16 @@ pub(crate) struct Mp4Source {
 
 impl Mp4Source {
     pub(crate) fn open(path: &Path) -> Result<Mp4Source, String> {
-        let mut file = File::open(path).map_err(|e| e.to_string())?;
+        let file = File::open(path).map_err(|e| e.to_string())?;
+        Self::new(Box::new(file))
+    }
+
+    fn new(mut media: Box<dyn MediaSource>) -> Result<Mp4Source, String> {
         // A file whose boxes cannot be read plays as Rodio's decoder would
         // play it: untrimmed.
-        let tracks = read_tracks(&mut file).unwrap_or_default();
-        file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-        let stream = MediaSourceStream::new(Box::new(file), Default::default());
+        let tracks = read_tracks(&mut media).unwrap_or_default();
+        media.rewind().map_err(|e| e.to_string())?;
+        let stream = MediaSourceStream::new(media, Default::default());
         let mut hint = Hint::new();
         hint.with_extension("m4a");
         let probed = symphonia::default::get_probe()
@@ -83,36 +87,16 @@ impl Mp4Source {
         let decoder = symphonia::default::get_codecs()
             .make(&params, &DecoderOptions::default())
             .map_err(|e| e.to_string())?;
-        // The MP4 reader leaves AAC's channel count to the decoder: the first
-        // packet decoded sets it.
-        let channels = params
-            .channels
-            .and_then(|c| u16::try_from(c.count()).ok())
-            .and_then(NonZero::new)
-            .unwrap_or(NonZero::<u16>::MIN);
-        let rate = params
-            .sample_rate
-            .and_then(NonZero::new)
-            .ok_or_else(|| "no sample rate".to_owned())?;
         let timescale = params
             .time_base
             .filter(|base| base.numer == 1)
             .map(|base| base.denom)
             .ok_or_else(|| "no timescale".to_owned())?;
         // Symphonia numbers the tracks in the order of their `trak` boxes.
-        let window = usize::try_from(track.id)
+        let timing = usize::try_from(track.id)
             .ok()
             .and_then(|i| tracks.get(i))
-            .and_then(|timing| timing.window(rate.get()));
-        // The media's length, which fragmented files give as 0.
-        let media_end = params
-            .n_frames
-            .filter(|&n| n > 0)
-            .map(|n| rescale(n, timescale, rate.get()));
-        let (start, end) = match window {
-            Some((start, length)) => (start, length.map(|l| start + l).or(media_end)),
-            None => (0, media_end),
-        };
+            .copied();
         let mut source = Mp4Source {
             track: track.id,
             format,
@@ -120,15 +104,32 @@ impl Mp4Source {
             timescale,
             buf: Vec::new(),
             pos: 0,
-            channels,
-            rate,
-            start,
-            end,
-            from: start,
+            channels: NonZero::<u16>::MIN,
+            rate: NonZero::<u32>::MIN,
+            start: 0,
+            end: None,
+            from: 0,
         };
-        // Decode the first packet now, so a file that cannot be decoded
-        // fails here.
-        source.refill()?;
+        // The channel count and the sample rate are the decoder's: the MP4
+        // reader leaves AAC's channel count unset, and its sample rate is the
+        // sample entry's, which cannot hold a rate above 65 535 Hz. Decoding
+        // the first packet now also makes a file that cannot be decoded fail
+        // here.
+        let first = source.decode_next()?;
+        let rate = source.rate.get();
+        // The media's length, which fragmented files give as 0.
+        let media_end = params
+            .n_frames
+            .filter(|&n| n > 0)
+            .map(|n| rescale(n, timescale, rate));
+        let (start, end) = match timing.and_then(|t| t.window(rate)) {
+            Some((start, length)) => (start, length.map(|l| start + l).or(media_end)),
+            None => (0, media_end),
+        };
+        (source.start, source.end, source.from) = (start, end, start);
+        if let Some((first, samples)) = first {
+            source.keep(first, &samples);
+        }
         Ok(source)
     }
 
@@ -136,20 +137,33 @@ impl Mp4Source {
     /// `buf`. `Ok(false)` at the end.
     fn refill(&mut self) -> Result<bool, String> {
         loop {
+            let Some((first, samples)) = self.decode_next()? else {
+                return Ok(false);
+            };
+            if self.end.is_some_and(|end| first >= end) {
+                return Ok(false);
+            }
+            if self.keep(first, &samples) {
+                return Ok(true);
+            }
+        }
+    }
+
+    /// Decodes the next packet of the track: the decoded frame its first
+    /// sample is, and its samples. Takes the channel count and the sample
+    /// rate from the decoded audio. `Ok(None)` at the end of the file.
+    fn decode_next(&mut self) -> Result<Option<(u64, SampleBuffer<f32>)>, String> {
+        loop {
             let packet = match self.format.next_packet() {
                 Ok(packet) => packet,
                 // Symphonia reports the end of the file as an I/O error.
                 Err(SymphoniaError::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                    return Ok(false);
+                    return Ok(None);
                 }
                 Err(e) => return Err(e.to_string()),
             };
             if packet.track_id() != self.track {
                 continue;
-            }
-            let first = rescale(packet.ts(), self.timescale, self.rate.get());
-            if self.end.is_some_and(|end| first >= end) {
-                return Ok(false);
             }
             let decoded = match self.decoder.decode(&packet) {
                 Ok(decoded) => decoded,
@@ -157,27 +171,42 @@ impl Mp4Source {
                 Err(SymphoniaError::DecodeError(_)) => continue,
                 Err(e) => return Err(e.to_string()),
             };
-            let frames = decoded.frames() as u64;
-            self.channels = u16::try_from(decoded.spec().channels.count())
+            let spec = *decoded.spec();
+            self.channels = u16::try_from(spec.channels.count())
                 .ok()
                 .and_then(NonZero::new)
                 .ok_or_else(|| "no channel count".to_owned())?;
-            let channels = usize::from(self.channels.get());
-            let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+            self.rate = NonZero::new(spec.rate).ok_or_else(|| "no sample rate".to_owned())?;
+            let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
             samples.copy_interleaved_ref(decoded);
-            let from = self.from.max(first);
-            let to = self
-                .end
-                .map_or(first + frames, |end| end.min(first + frames));
-            if from >= to {
-                continue;
-            }
-            let range = (from - first) as usize * channels..(to - first) as usize * channels;
-            self.buf.clear();
-            self.buf.extend_from_slice(&samples.samples()[range]);
-            self.pos = 0;
-            return Ok(true);
+            let first = rescale(packet.ts(), self.timescale, self.rate.get());
+            return Ok(Some((first, samples)));
         }
+    }
+
+    /// Keeps in `buf` the frames of a decoded packet that start at `first`
+    /// that are to be played. `false` when there are none.
+    fn keep(&mut self, first: u64, samples: &SampleBuffer<f32>) -> bool {
+        let channels = usize::from(self.channels.get());
+        let frames = (samples.samples().len() / channels) as u64;
+        let from = self.from.max(first);
+        let to = min_end(self.end, Some(first + frames)).unwrap();
+        if from >= to {
+            return false;
+        }
+        let range = (from - first) as usize * channels..(to - first) as usize * channels;
+        self.buf.clear();
+        self.buf.extend_from_slice(&samples.samples()[range]);
+        self.pos = 0;
+        true
+    }
+}
+
+/// The earlier of two ends, where `None` is no end.
+fn min_end(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
@@ -306,9 +335,9 @@ impl TrackTiming {
 
 /// Reads the timing of every track, in the order of the `trak` boxes in the
 /// file's `moov` box.
-fn read_tracks(file: &mut File) -> io::Result<Vec<TrackTiming>> {
+fn read_tracks(file: &mut (impl Read + Seek)) -> io::Result<Vec<TrackTiming>> {
     let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, what.to_owned());
-    let len = file.metadata()?.len();
+    let len = file.seek(SeekFrom::End(0))?;
     let mut at = 0;
     while at < len {
         file.seek(SeekFrom::Start(at))?;

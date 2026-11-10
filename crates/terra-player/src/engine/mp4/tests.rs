@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::Cursor;
 use std::path::PathBuf;
 
 use super::*;
@@ -143,4 +144,38 @@ fn malformed_boxes_end_the_list() {
     data.extend_from_slice(b"trak");
     let kinds: Vec<[u8; 4]> = boxes(&data).map(|(kind, _)| kind).collect();
     assert_eq!(kinds, [*b"free"]);
+}
+
+/// `a.aac.m4a`, with `patch` applied to its bytes.
+fn patched(patch: impl FnOnce(&mut Vec<u8>)) -> Mp4Source {
+    let mut data = Vec::new();
+    fixture("a.aac.m4a").read_to_end(&mut data).unwrap();
+    patch(&mut data);
+    Mp4Source::new(Box::new(Cursor::new(data))).unwrap()
+}
+
+/// Where the first `kind` box starts in `data`.
+fn find_box(data: &[u8], kind: &[u8; 4]) -> usize {
+    data.windows(4).position(|w| w == kind).unwrap() - 4
+}
+
+fn set_u32(data: &mut [u8], at: usize, expected: u32, value: u32) {
+    assert_eq!(
+        u32::from_be_bytes(data[at..at + 4].try_into().unwrap()),
+        expected
+    );
+    data[at..at + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+#[test]
+fn the_sample_rate_is_the_decoders() {
+    // The sample entry's rate is 16.16 fixed point and cannot hold rates
+    // above 65 535 Hz; a muxer may leave it 0. The decoder reads the rate
+    // from the AudioSpecificConfig.
+    let source = patched(|data| {
+        let mp4a = find_box(data, b"mp4a");
+        set_u32(data, mp4a + 32, 48_000 << 16, 0);
+    });
+    assert_eq!(source.sample_rate().get(), 48_000);
+    assert_eq!(source.count(), 72_517);
 }
