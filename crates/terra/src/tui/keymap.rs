@@ -1,7 +1,7 @@
 //! The keymap: which key does what, in which context. The help overlay and
 //! the key hints read the same table.
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{Action, App};
 use super::playlist::Modal;
@@ -440,20 +440,6 @@ pub fn action_for_key(context: Context, key: Key) -> Option<Action> {
         (None, KeyCode::Char(c), Context::Prompt) if key.modifiers.is_empty() => {
             Some(Action::PromptInput(c))
         }
-        _ => None,
-    }
-}
-
-/// The action a terminal event performs in the state's current context.
-pub fn action_for_event(app: &App, event: &Event) -> Option<Action> {
-    match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => {
-            action_for_key(Context::of(app), Key::from_event(key))
-        }
-        Event::Resize(width, height) => Some(Action::Resize {
-            width: *width,
-            height: *height,
-        }),
         _ => None,
     }
 }

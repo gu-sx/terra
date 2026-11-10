@@ -10,9 +10,13 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
 use terra_core::testing::{MemoryLibrary, block_on};
-use terra_core::{LibraryBackend, Page, Track, TrackFilter, TrackId};
+use terra_core::{
+    Album, AlbumId, AlbumKind, AlbumRef, LibraryBackend, Page, Track, TrackFilter, TrackId,
+};
 
-use super::app::{Action, App, Focus, Item, Load, Request, Response, receive, update};
+use super::app::{
+    Action, App, Focus, Item, Load, Request, Response, View, handle_event, receive, update,
+};
 use super::fetch::fetch;
 use super::keymap::{self, Context, KEYMAP};
 use super::playlist::Modal;
@@ -64,14 +68,22 @@ impl Harness {
     }
 
     fn key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        let event = Event::Key(KeyEvent::new(code, modifiers));
-        if let Some(action) = keymap::action_for_event(&self.app, &event) {
-            self.dispatch(action);
-        }
+        let requests = self.key_unanswered(code, modifiers);
+        self.answer(requests);
     }
 
     fn press(&mut self, code: KeyCode) {
         self.key(code, KeyModifiers::NONE);
+    }
+
+    /// Presses a key and returns its requests without running them.
+    fn key_unanswered(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Vec<Request> {
+        let event = Event::Key(KeyEvent::new(code, modifiers));
+        handle_event(&mut self.app, &event)
+    }
+
+    fn press_unanswered(&mut self, code: KeyCode) -> Vec<Request> {
+        self.key_unanswered(code, KeyModifiers::NONE)
     }
 
     /// Types each character as a key, with Shift for capitals as a terminal
@@ -340,9 +352,11 @@ fn a_response_for_a_closed_screen_is_dropped() {
     // Open Artists, but leave its request unanswered.
     harness.type_text("hj");
     let stale = update(&mut harness.app, Action::Open);
-    // Open Albums instead.
-    harness.type_text("hj");
-    harness.press(KeyCode::Enter);
+    // Open Albums instead. Keys would wait for Artists to load, so the
+    // actions go to `update` directly.
+    for action in [Action::FocusSidebar, Action::MoveDown, Action::Open] {
+        harness.dispatch(action);
+    }
     assert_eq!(harness.app.breadcrumb(), "LIBRARY / ALBUMS");
     for request in stale {
         let response = block_on(fetch(&harness.library, request));
@@ -1070,4 +1084,140 @@ fn a_playlist_opened_during_an_edit_waits_for_it() {
     assert_eq!(harness.names(), ["Sunrise", "Last Light"]);
     harness.type_text("J");
     assert_eq!(harness.stored()[0].1, ["Last Light", "Sunrise"]);
+}
+
+/// The sample library with a second album by Artist A, "Twilight", after
+/// "Nocturnes", holding "Dusk" and "Starlight" in that order.
+fn two_album_library() -> MemoryLibrary {
+    let mut library = MemoryLibrary::sample();
+    let (template, source) = terra_core::testing::sample::library().tracks.remove(0);
+    let album = Album {
+        id: AlbumId::new(4),
+        title: "Twilight".to_owned(),
+        album_artist: template.artist.clone(),
+        year: Some(2024),
+        kind: AlbumKind::Album,
+    };
+    library.insert_album(album.clone());
+    for (number, title) in [(1, "Dusk"), (2, "Starlight")] {
+        let track = Track {
+            id: TrackId::new(100 + number),
+            title: title.to_owned(),
+            album: Some(AlbumRef {
+                id: album.id,
+                title: album.title.clone(),
+            }),
+            track_no: Some(u32::try_from(number).unwrap()),
+            ..template.clone()
+        };
+        library.insert_track(track, source.clone());
+    }
+    library
+}
+
+/// Artists, with Artist A selected.
+fn artists_at_artist_a(library: MemoryLibrary) -> Harness {
+    let mut harness = Harness::new(library);
+    harness.type_text("hj");
+    harness.press(KeyCode::Enter);
+    harness.type_text("j");
+    assert_eq!(harness.selected(), "Artist A");
+    harness
+}
+
+/// Runs a request and returns the requests its response leads to, without
+/// running them.
+fn respond(harness: &mut Harness, request: Request) -> Vec<Request> {
+    let response = block_on(fetch(&harness.library, request));
+    receive(&mut harness.app, response)
+}
+
+#[test]
+fn keys_typed_while_a_list_loads_act_on_it_once_it_has() {
+    let mut harness = artists_at_artist_a(two_album_library());
+    let artist = harness.press_unanswered(KeyCode::Enter);
+    // Artist A's albums are loading: `j`, `Enter` and `j` wait for them.
+    assert!(harness.press_unanswered(KeyCode::Char('j')).is_empty());
+    assert!(harness.press_unanswered(KeyCode::Enter).is_empty());
+    assert!(harness.press_unanswered(KeyCode::Char('j')).is_empty());
+    assert_eq!(harness.app.breadcrumb(), "LIBRARY / ARTISTS / ARTIST A");
+
+    let [artist] = <[Request; 1]>::try_from(artist).unwrap();
+    let album = respond(&mut harness, artist);
+    // `j` selected the second album and `Enter` opened it.
+    let [Request::Screen { view, .. }] = album.as_slice() else {
+        panic!("expected the album's tracks to be requested: {album:?}");
+    };
+    assert_eq!(
+        *view,
+        View::Tracks(TrackFilter {
+            album: Some(AlbumId::new(4)),
+            ..TrackFilter::default()
+        })
+    );
+    assert_eq!(
+        harness.app.breadcrumb(),
+        "LIBRARY / ARTISTS / ARTIST A / TWILIGHT"
+    );
+
+    // The last `j` waits for the album's tracks.
+    assert_eq!(harness.app.rows(), &Load::Loading);
+    harness.answer(album);
+    assert_eq!(harness.names(), ["Dusk", "Starlight"]);
+    assert_eq!(harness.selected(), "Starlight");
+}
+
+#[test]
+fn back_while_a_list_loads_acts_at_once_and_drops_the_held_keys() {
+    for back in [KeyCode::Esc, KeyCode::Backspace] {
+        let mut harness = artists_at_artist_a(two_album_library());
+        let artist = harness.press_unanswered(KeyCode::Enter);
+        assert!(harness.press_unanswered(KeyCode::Char('j')).is_empty());
+        assert!(harness.press_unanswered(KeyCode::Enter).is_empty());
+
+        assert!(harness.press_unanswered(back).is_empty());
+        assert_eq!(harness.app.breadcrumb(), "LIBRARY / ARTISTS", "{back:?}");
+        // The held `j` and `Enter` are gone: the late response is dropped,
+        // and the next key acts at once.
+        for request in artist {
+            assert!(respond(&mut harness, request).is_empty(), "{back:?}");
+        }
+        assert_eq!(harness.selected(), "Artist A", "{back:?}");
+        harness.type_text("j");
+        assert_eq!(harness.selected(), "Artist B", "{back:?}");
+    }
+}
+
+#[test]
+fn quit_while_a_list_loads_acts_at_once() {
+    for (code, modifiers) in [
+        (KeyCode::Char('q'), KeyModifiers::NONE),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ] {
+        let mut harness = artists_at_artist_a(MemoryLibrary::sample());
+        harness.press_unanswered(KeyCode::Enter);
+        assert!(harness.press_unanswered(KeyCode::Char('j')).is_empty());
+        assert!(harness.key_unanswered(code, modifiers).is_empty());
+        assert!(harness.app.quit, "{code:?}");
+    }
+}
+
+#[test]
+fn search_typing_is_not_held_but_keys_after_it_wait_for_the_results() {
+    let mut harness = Harness::sample();
+    let mut searches = harness.press_unanswered(KeyCode::Char('/'));
+    for c in "artist".chars() {
+        searches.extend(harness.press_unanswered(KeyCode::Char(c)));
+    }
+    // Every character went into the query while the results were loading.
+    assert_eq!(harness.app.editing_search().unwrap().query, "artist");
+    assert_eq!(searches.len(), 6);
+
+    // Enter keeps the results, and `j` waits for them.
+    assert!(harness.press_unanswered(KeyCode::Enter).is_empty());
+    assert!(harness.app.editing_search().is_none());
+    assert!(harness.press_unanswered(KeyCode::Char('j')).is_empty());
+    harness.answer(searches);
+    // The results start at Artist A; the held `j` moved down from it.
+    assert_eq!(harness.selected(), "Artist B");
 }

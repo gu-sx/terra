@@ -6,14 +6,22 @@
 //! [`fetch`](super::fetch::fetch) and hands the [`Response`] to [`receive`].
 //! A response whose screen or search is gone by the time it arrives is
 //! dropped, so a slow backend never overwrites a newer list.
+//!
+//! Keys reach the state through [`handle_event`]. While the main list is
+//! loading, a key typed to browse it is held, and the held keys are replayed
+//! in order once [`receive`] has loaded the list or failed to, so that each
+//! key acts on the list it was typed for. Quit and back act at once, and back
+//! drops the held keys, as does leaving the screen in any other way.
 
 use std::collections::VecDeque;
 
+use crossterm::event::{Event, KeyEventKind};
 use terra_core::{
     Album, AlbumFilter, AlbumKind, Artist, ArtistId, Playlist, PlaylistEntry, PlaylistId, Track,
     TrackFilter,
 };
 
+use super::keymap::{self, Context, Key};
 use super::playlist::{Edit, Modal};
 use super::render;
 
@@ -292,6 +300,10 @@ pub struct App {
     pub modal: Option<Modal>,
     /// The edits not yet done, in order. The first is running.
     pub(super) edits: VecDeque<Edit>,
+    /// Keys typed to browse the main list while it was loading, in order.
+    pub(super) held: VecDeque<Key>,
+    /// The screen whose list the held keys wait for.
+    held_for: ScreenId,
     /// The result of the last edit, until the next key.
     pub status: Option<Status>,
     pub help: bool,
@@ -316,6 +328,8 @@ impl App {
             stack: Vec::new(),
             modal: None,
             edits: VecDeque::new(),
+            held: VecDeque::new(),
+            held_for: 0,
             status: None,
             help: false,
             quit: false,
@@ -578,6 +592,65 @@ impl App {
             None => {}
         }
     }
+
+    /// Applies a key in the current context, or holds it while the main list
+    /// it would browse is loading, or while other keys are held.
+    pub(super) fn press(&mut self, key: Key) -> Vec<Request> {
+        let context = Context::of(self);
+        let action = keymap::action_for_key(context, key);
+        let hold = !self.held.is_empty()
+            || (context == Context::Browse && matches!(self.rows(), Load::Loading));
+        match action {
+            Some(Action::Back) => {
+                self.held.clear();
+                update(self, Action::Back)
+            }
+            Some(Action::Quit) => update(self, Action::Quit),
+            _ if hold => {
+                if self.held.is_empty() {
+                    self.held_for = self.top().id;
+                }
+                self.held.push_back(key);
+                Vec::new()
+            }
+            Some(action) => update(self, action),
+            None => Vec::new(),
+        }
+    }
+
+    /// Replays the held keys once the list they wait for has loaded or
+    /// failed, and drops them once its screen is gone. A replayed key that
+    /// opens another loading screen holds the keys after it for that screen.
+    fn replay(&mut self) -> Vec<Request> {
+        if self.held.is_empty() {
+            return Vec::new();
+        }
+        if self.top().id != self.held_for {
+            self.held.clear();
+            return Vec::new();
+        }
+        if matches!(self.rows(), Load::Loading) {
+            return Vec::new();
+        }
+        let keys = std::mem::take(&mut self.held);
+        keys.into_iter().flat_map(|key| self.press(key)).collect()
+    }
+}
+
+/// Applies a terminal event: a key through the keymap, held while the main
+/// list loads, or a resize, at once.
+pub fn handle_event(app: &mut App, event: &Event) -> Vec<Request> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => app.press(Key::from_event(key)),
+        Event::Resize(width, height) => update(
+            app,
+            Action::Resize {
+                width: *width,
+                height: *height,
+            },
+        ),
+        _ => Vec::new(),
+    }
 }
 
 /// Applies an action to the state and returns the data it needs loaded.
@@ -655,8 +728,17 @@ pub fn update(app: &mut App, action: Action) -> Vec<Request> {
 }
 
 /// Stores what the backend returned, unless its screen, search or load is
-/// gone, and returns the data that the result makes stale.
+/// gone, replays the keys held for the list it loaded, and returns the data
+/// that the result makes stale and the replayed keys need.
 pub fn receive(app: &mut App, response: Response) -> Vec<Request> {
+    let mut requests = store(app, response);
+    requests.extend(app.replay());
+    requests
+}
+
+/// Stores what the backend returned, unless its screen, search or load is
+/// gone, and returns the data that the result makes stale.
+fn store(app: &mut App, response: Response) -> Vec<Request> {
     let Response { request, result } = response;
     let to_rows = |result: Result<Payload, String>| match result {
         Ok(Payload::Items(items)) => Load::Ready(items),
