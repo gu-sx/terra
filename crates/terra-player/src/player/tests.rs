@@ -200,8 +200,7 @@ fn the_queue_running_out_stops() {
     h.calls();
     h.end(a);
     assert_eq!(h.events(), [started(a), ended(a), PlayerEvent::Stopped]);
-    // The engine has nothing left to clear.
-    assert_eq!(h.calls(), []);
+    assert_eq!(h.calls(), [Call::Clear]);
     assert_eq!(h.core.state, State::Stopped);
     assert_eq!(h.core.queue.current_id(), None);
 }
@@ -486,4 +485,38 @@ fn clearing_the_queue_stops() {
     assert_eq!(h.calls(), [Call::Clear]);
     assert!(h.core.queue.is_empty());
     assert_eq!(h.core.state, State::Stopped);
+}
+
+#[test]
+fn an_item_replaced_as_the_engine_started_it_gives_way_to_its_replacement() {
+    let mut h = Harness::new();
+    let a = h.play("a");
+    let b = h.append("b");
+    let c = h.append("c");
+    h.start(a);
+    h.calls();
+    h.core.command(Command::Remove(b));
+    assert_eq!(h.calls(), [Call::SetNext(Some(c))]);
+    // The engine reached the join before the replacement arrived.
+    h.end(a);
+    h.start(b);
+    assert_eq!(h.calls()[..2], [Call::Load(c), Call::Play]);
+    h.start(c);
+    assert_eq!(h.events(), [started(a), ended(a), started(c)]);
+    assert_eq!(h.core.queue.current_id(), Some(c));
+}
+
+#[test]
+fn an_item_dropped_as_the_engine_started_it_stops_at_the_end() {
+    let mut h = Harness::new();
+    let a = h.play("a");
+    let b = h.append("b");
+    h.start(a);
+    h.calls();
+    h.core.command(Command::Remove(b));
+    assert_eq!(h.calls(), [Call::SetNext(None)]);
+    h.end(a);
+    h.start(b);
+    assert_eq!(h.calls(), [Call::Clear]);
+    assert_eq!(h.events(), [started(a), ended(a), PlayerEvent::Stopped]);
 }

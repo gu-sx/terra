@@ -305,6 +305,9 @@ struct Core<E> {
     /// An item the engine could not open as the next one. It is not handed
     /// over again; loading it reports the error when its turn comes.
     next_failed: Option<QueueItemId>,
+    /// Items handed over as the next one and replaced since. The engine may
+    /// reach the join before a replacement arrives and start one of them.
+    replaced: Vec<QueueItemId>,
 }
 
 impl<E: Engine> Core<E> {
@@ -318,6 +321,7 @@ impl<E: Engine> Core<E> {
             loading: None,
             next: None,
             next_failed: None,
+            replaced: Vec::new(),
         }
     }
 
@@ -457,6 +461,12 @@ impl<E: Engine> Core<E> {
                 self.advance();
                 return;
             }
+        } else if self.replaced.contains(&item) && self.current.is_none() {
+            // The engine started an item replaced too late, and the
+            // replacement waits behind it: play what the queue has next.
+            self.current = Some(item);
+            self.advance();
+            return;
         } else {
             return;
         }
@@ -513,6 +523,7 @@ impl<E: Engine> Core<E> {
                     self.loading = Some(item);
                     self.next = None;
                     self.next_failed = None;
+                    self.replaced.clear();
                     if self.state == State::Paused {
                         self.engine.pause();
                     } else {
@@ -537,13 +548,16 @@ impl<E: Engine> Core<E> {
     }
 
     fn stop(&mut self) {
-        if self.current.is_some() || self.next.is_some() {
+        // Also when nothing is known to play: the engine may have started an
+        // item handed over and replaced just before it ended the last one.
+        if self.state != State::Stopped || self.current.is_some() || self.next.is_some() {
             self.engine.clear();
         }
         self.current = None;
         self.loading = None;
         self.next = None;
         self.next_failed = None;
+        self.replaced.clear();
         if self.state != State::Stopped {
             self.state = State::Stopped;
             self.emit(PlayerEvent::Stopped);
@@ -559,6 +573,9 @@ impl<E: Engine> Core<E> {
         let want = self.queue.peek_next();
         if want == self.next || (want.is_some() && want == self.next_failed) {
             return;
+        }
+        if let Some(old) = self.next {
+            self.replaced.push(old);
         }
         let source = want.and_then(|item| self.queue.get(item).map(|source| (item, source)));
         match self.engine.set_next(source) {
