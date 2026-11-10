@@ -555,8 +555,17 @@ pub async fn search_ignores_case<B: LibraryBackend>(backend: B) {
 
 pub async fn search_ignores_accents<B: LibraryBackend>(backend: B) {
     // The precomposed é (U+00E9) and e followed by a combining acute accent
-    // (U+0301) are the same letter, and both match a plain e.
-    for query in ["cafe", "CAFE", "café", "CAFÉ", "caf", "cafe\u{301}"] {
+    // (U+0301) are the same letter, and both match a plain e. Any combining
+    // mark is ignored, such as the overline (U+0305) on "ca\u{305}fe".
+    for query in [
+        "cafe",
+        "CAFE",
+        "café",
+        "CAFÉ",
+        "caf",
+        "cafe\u{301}",
+        "ca\u{305}fe",
+    ] {
         let found = search_names(&backend, query, 10).await;
         assert!(
             found.0.contains(&"Café Ensemble".to_owned()),
