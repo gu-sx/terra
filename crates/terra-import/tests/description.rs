@@ -167,6 +167,15 @@ fn formats() {
             ],
         ),
         (
+            "two timestamps without a separator: the first is the start",
+            "00:00 03:00 Artist A - One\nArtist B - Two 03:00 05:00\n(05:00 07:00) Artist C - Three",
+            vec![
+                (hms(0, 0, 0), Some(hms(0, 3, 0)), Some("Artist A"), "One"),
+                (hms(0, 3, 0), Some(hms(0, 5, 0)), Some("Artist B"), "Two"),
+                (hms(0, 5, 0), None, Some("Artist C"), "Three"),
+            ],
+        ),
+        (
             "en and em dashes",
             "00:00 Artist A – One\n02:00 Artist B — Two\n04:00 Artist C - Part – Two",
             vec![
@@ -199,16 +208,16 @@ fn formats() {
             ],
         ),
         (
-            "a timestamp inside the text stays in the title",
+            "a timestamp inside the text stays in the title, and the first is the start",
             "00:00 Artist A - Live at 12:00\nArtist B - Ends 4:00 here 05:00",
             vec![
                 (
                     hms(0, 0, 0),
-                    Some(hms(0, 5, 0)),
+                    Some(hms(0, 4, 0)),
                     Some("Artist A"),
                     "Live at 12:00",
                 ),
-                (hms(0, 5, 0), None, Some("Artist B"), "Ends 4:00 here"),
+                (hms(0, 4, 0), None, Some("Artist B"), "Ends 4:00 here"),
             ],
         ),
         (

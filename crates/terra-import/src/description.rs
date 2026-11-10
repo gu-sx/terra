@@ -72,8 +72,10 @@ struct Stamp {
 fn parse_track_line(line: &str) -> Option<(Duration, &str)> {
     let body = strip_numbering(line);
     let stamps = find_stamps(body);
-    let (at, text) = leading(body, &stamps).or_else(|| trailing(body, &stamps))?;
-    Some((at, trim_separators(text)))
+    let text = leading(body, &stamps).or_else(|| trailing(body, &stamps))?;
+    // The grammar takes the line's first timestamp as the start, wherever it
+    // stands.
+    Some((stamps[0].at, trim_separators(text)))
 }
 
 /// Removes numbering such as `1.`, `01)` or `#1`, followed by whitespace,
@@ -193,12 +195,13 @@ fn ends_token(line: &str, at: usize) -> bool {
     }
 }
 
-/// The separators that join two timestamps into a range.
+/// The separators that may join two timestamps into a group, besides
+/// whitespace.
 const RANGE_SEPARATORS: [&str; 4] = ["-", "–", "—", "~"];
 
-/// Matches a timestamp or range, optionally bracketed, at the start of the
-/// line, and returns its start and the text after it.
-fn leading<'a>(line: &'a str, stamps: &[Stamp]) -> Option<(Duration, &'a str)> {
+/// Matches a timestamp, or a group of two, optionally bracketed, at the start
+/// of the line, and returns the text after it.
+fn leading<'a>(line: &'a str, stamps: &[Stamp]) -> Option<&'a str> {
     let first = stamps.first()?;
     let (closer, mut at) = match line.as_bytes().first() {
         Some(b'[') => (Some(']'), 1),
@@ -217,11 +220,11 @@ fn leading<'a>(line: &'a str, stamps: &[Stamp]) -> Option<(Duration, &'a str)> {
         .find(|separator| line[after..].starts_with(**separator))
     {
         after = skip_space(line, after + separator.len());
-        if let Some(second) = stamps.get(1)
-            && second.from == after
-        {
-            at = second.to;
-        }
+    }
+    if let Some(second) = stamps.get(1)
+        && second.from == after
+    {
+        at = second.to;
     }
 
     if let Some(closer) = closer {
@@ -231,12 +234,12 @@ fn leading<'a>(line: &'a str, stamps: &[Stamp]) -> Option<(Duration, &'a str)> {
         }
         at += closer.len_utf8();
     }
-    Some((first.at, &line[at..]))
+    Some(&line[at..])
 }
 
-/// Matches a timestamp or range, optionally bracketed, at the end of the
-/// line, and returns its start and the text before it.
-fn trailing<'a>(line: &'a str, stamps: &[Stamp]) -> Option<(Duration, &'a str)> {
+/// Matches a timestamp, or a group of two, optionally bracketed, at the end
+/// of the line, and returns the text before it.
+fn trailing<'a>(line: &'a str, stamps: &[Stamp]) -> Option<&'a str> {
     let last = stamps.last()?;
     let (opener, mut at) = match line.as_bytes().last() {
         Some(b']') => (Some('['), line.len() - 1),
@@ -248,20 +251,18 @@ fn trailing<'a>(line: &'a str, stamps: &[Stamp]) -> Option<(Duration, &'a str)> 
         return None;
     }
     at = last.from;
-    let mut start = last.at;
 
-    let before = skip_space_back(line, at);
+    let mut before = skip_space_back(line, at);
     if let Some(separator) = RANGE_SEPARATORS
         .iter()
         .find(|separator| line[..before].ends_with(**separator))
     {
-        let before = skip_space_back(line, before - separator.len());
-        if let [.., first, _] = stamps
-            && first.to == before
-        {
-            at = first.from;
-            start = first.at;
-        }
+        before = skip_space_back(line, before - separator.len());
+    }
+    if let [.., first, _] = stamps
+        && first.to == before
+    {
+        at = first.from;
     }
 
     if let Some(opener) = opener {
@@ -271,7 +272,7 @@ fn trailing<'a>(line: &'a str, stamps: &[Stamp]) -> Option<(Duration, &'a str)> 
         }
         at -= opener.len_utf8();
     }
-    Some((start, &line[..at]))
+    Some(&line[..at])
 }
 
 /// Returns the index after any whitespace at `at`.

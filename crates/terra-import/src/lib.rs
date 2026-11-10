@@ -24,13 +24,18 @@
 //!   or `#1` followed by whitespace, or
 //! - at the end of the line.
 //!
-//! When the line starts with a timestamp, that one is used; otherwise the one
-//! at the end. Two timestamps joined by `-`, `–`, `—` or `~`, such as
-//! `00:00 - 05:42`, count as one range, and the first is the start. A
-//! timestamp elsewhere in the line is part of the text. Lines that are not
-//! track lines are ignored.
+//! Lines that are not track lines are ignored.
 //!
-//! **Artist and title.** After the timestamp (or range) and the numbering are
+//! **Start.** If a track line has more than one timestamp, the first one is
+//! the start, wherever it stands: `Artist A - One 00:00 05:00` starts at
+//! 0:00, and `Artist B - At 4:00 here 05:00` at 4:00.
+//!
+//! **Timestamp group.** The timestamp at the start of the line, or else the
+//! one at the end, is removed from the text, together with a second timestamp
+//! next to it, separated by whitespace or by `-`, `–`, `—` or `~`, as in
+//! `00:00 - 05:42`. Other timestamps stay in the text.
+//!
+//! **Artist and title.** After the timestamp group and the numbering are
 //! removed, whitespace and the separators `-`, `–`, `—`, `~`, `|` and `:` are
 //! trimmed from both ends of the remaining text. The text splits into artist
 //! and title at the first ` - `, ` – ` or ` — `; without one of those, the
