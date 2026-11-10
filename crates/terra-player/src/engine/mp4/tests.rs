@@ -168,6 +168,25 @@ fn set_u32(data: &mut [u8], at: usize, expected: u32, value: u32) {
 }
 
 #[test]
+fn an_edit_rounded_up_past_the_media_stops_at_its_end() {
+    // A movie timescale of 1000 cannot count 72 517 frames at 48 kHz, so
+    // the edit rounds up to 1511 ms: 72 528 frames, 11 past the media's
+    // 73 541. The last packet decodes to a whole 1024 frames, so those 11
+    // would be padding.
+    let source = patched(|data| {
+        let mvhd = find_box(data, b"mvhd");
+        set_u32(data, mvhd + 8 + 12, 48_000, 1000);
+        let elst = find_box(data, b"elst");
+        set_u32(data, elst + 8 + 8, 72_517, 1511);
+    });
+    assert_eq!(
+        source.total_duration(),
+        Some(frames_to_duration(72_517, 48_000))
+    );
+    assert_eq!(source.count(), 72_517);
+}
+
+#[test]
 fn the_sample_rate_is_the_decoders() {
     // The sample entry's rate is 16.16 fixed point and cannot hold rates
     // above 65 535 Hz; a muxer may leave it 0. The decoder reads the rate

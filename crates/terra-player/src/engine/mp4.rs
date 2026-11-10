@@ -123,7 +123,9 @@ impl Mp4Source {
             .filter(|&n| n > 0)
             .map(|n| rescale(n, timescale, rate));
         let (start, end) = match timing.and_then(|t| t.window(rate)) {
-            Some((start, length)) => (start, length.map(|l| start + l).or(media_end)),
+            // An edit duration rounded up in a coarse movie timescale can
+            // reach past the media, into the last packet's padding.
+            Some((start, length)) => (start, min_end(length.map(|l| start + l), media_end)),
             None => (0, media_end),
         };
         (source.start, source.end, source.from) = (start, end, start);
