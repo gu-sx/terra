@@ -1221,3 +1221,127 @@ fn search_typing_is_not_held_but_keys_after_it_wait_for_the_results() {
     // The results start at Artist A; the held `j` moved down from it.
     assert_eq!(harness.selected(), "Artist B");
 }
+
+const SAVING: &str = "│Saving playlist changes… (q again to quit now)";
+
+/// "Driving" open, and `J` pressed with its edit returned unanswered.
+fn moved_once() -> (Harness, Request) {
+    let mut harness = Harness::playlists();
+    harness.open_playlist(0);
+    let edit = harness.key_unanswered(KeyCode::Char('J'), KeyModifiers::SHIFT);
+    let [edit] = <[Request; 1]>::try_from(edit).unwrap();
+    (harness, edit)
+}
+
+#[test]
+fn quit_waits_for_pending_edits() {
+    let (mut harness, first) = moved_once();
+    let queued = harness.key_unanswered(KeyCode::Char('J'), KeyModifiers::SHIFT);
+    assert!(queued.is_empty());
+    assert!(harness.press_unanswered(KeyCode::Char('q')).is_empty());
+    assert!(!harness.app.quit);
+    assert!(harness.status_line().starts_with(SAVING));
+
+    let second = respond(&mut harness, first);
+    assert!(matches!(second.as_slice(), [Request::Edit(_)]));
+    assert!(!harness.app.quit);
+    assert!(harness.status_line().starts_with(SAVING));
+
+    let [second] = <[Request; 1]>::try_from(second).unwrap();
+    // The last edit quits instead of reloading.
+    assert!(respond(&mut harness, second).is_empty());
+    assert!(harness.app.quit);
+    assert!(super::exit(&harness.app).is_ok());
+    assert_eq!(
+        harness.stored()[0].1,
+        ["Sunrise", "Last Light", "Midnight Drive"]
+    );
+}
+
+#[test]
+fn a_second_quit_quits_at_once() {
+    for (code, modifiers) in [
+        (KeyCode::Char('q'), KeyModifiers::NONE),
+        (KeyCode::Char('c'), KeyModifiers::CONTROL),
+    ] {
+        let (mut harness, _edit) = moved_once();
+        assert!(harness.key_unanswered(code, modifiers).is_empty());
+        assert!(!harness.app.quit, "{code:?}");
+        assert!(harness.key_unanswered(code, modifiers).is_empty());
+        assert!(harness.app.quit, "{code:?}");
+        assert!(super::exit(&harness.app).is_ok(), "{code:?}");
+    }
+}
+
+#[test]
+fn a_failed_edit_while_quitting_quits_and_reports_it() {
+    let (mut harness, first) = moved_once();
+    let queued = harness.key_unanswered(KeyCode::Char('J'), KeyModifiers::SHIFT);
+    assert!(queued.is_empty());
+    assert!(harness.press_unanswered(KeyCode::Char('q')).is_empty());
+    let Request::Edit(edit) = first else {
+        panic!("not an edit: {first:?}");
+    };
+    let requests = receive(
+        &mut harness.app,
+        Response {
+            request: Request::Edit(edit),
+            result: Err("library storage failed".to_owned()),
+        },
+    );
+    // The queued move is dropped, and nothing reloads.
+    assert!(requests.is_empty());
+    assert!(harness.app.quit);
+    let error = super::exit(&harness.app).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "playlist changes not saved: library storage failed"
+    );
+}
+
+#[test]
+fn keys_are_ignored_while_quitting() {
+    let (mut harness, edit) = moved_once();
+    assert!(harness.press_unanswered(KeyCode::Char('q')).is_empty());
+    let names = harness.names();
+    let selected = harness.selected();
+    for code in [KeyCode::Char('j'), KeyCode::Char('x')] {
+        assert!(harness.press_unanswered(code).is_empty(), "{code:?}");
+    }
+    assert_eq!(harness.names(), names);
+    assert_eq!(harness.selected(), selected);
+    assert!(harness.status_line().starts_with(SAVING));
+    // A resize still applies.
+    assert!(handle_event(&mut harness.app, &Event::Resize(WIDTH, HEIGHT + 10)).is_empty());
+    assert_eq!(
+        harness.app.list_height,
+        super::render::list_height(WIDTH, HEIGHT + 10)
+    );
+    assert_ne!(
+        harness.app.list_height,
+        super::render::list_height(WIDTH, HEIGHT)
+    );
+    assert!(!harness.app.quit);
+    harness.answer(vec![edit]);
+    assert!(harness.app.quit);
+    assert_eq!(
+        harness.stored()[0].1,
+        ["Sunrise", "Midnight Drive", "Last Light"]
+    );
+}
+
+#[test]
+fn quitting_from_a_prompt_closes_it_so_that_q_quits() {
+    let (mut harness, _edit) = moved_once();
+    harness.type_text("n");
+    assert!(matches!(harness.app.modal, Some(Modal::Name { .. })));
+    assert!(
+        harness
+            .key_unanswered(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            .is_empty()
+    );
+    assert!(harness.app.modal.is_none());
+    assert!(harness.status_line().starts_with(SAVING));
+    assert!(harness.press_unanswered(KeyCode::Char('q')).is_empty());
+    assert!(harness.app.quit);
+}
