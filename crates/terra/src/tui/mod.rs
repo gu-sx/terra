@@ -3,12 +3,15 @@
 //! The UI is generic over [`LibraryBackend`], so it is the same whether the
 //! library is local or remote. It follows one loop:
 //!
-//! - [`keymap`] turns a terminal event into an [`Action`];
+//! - [`handle_event`] turns a terminal event into an [`Action`] through the
+//!   [`keymap`], holding a key typed to browse a list that is still loading
+//!   until it has loaded;
 //! - [`update`] applies the action to the [`App`] state and returns the
 //!   [`Request`](app::Request)s for data it needs;
 //! - [`fetch`] runs a request against the backend, and [`receive`] stores
-//!   its [`Response`](app::Response) and returns the requests it leads to,
-//!   such as reloading a playlist after an edit;
+//!   its [`Response`](app::Response), replays the keys held for it and
+//!   returns the requests they lead to, such as reloading a playlist after
+//!   an edit;
 //! - [`render`] draws the state.
 //!
 //! Only the rows of the main list that fit on the terminal are drawn.
@@ -35,7 +38,7 @@ use ratatui::DefaultTerminal;
 use terra_core::LibraryBackend;
 use terra_core::testing::MemoryLibrary;
 
-pub use app::{Action, App, receive, update};
+pub use app::{Action, App, handle_event, receive, update};
 pub use fetch::fetch;
 pub use render::render;
 
@@ -101,18 +104,15 @@ async fn event_loop<B: LibraryBackend>(
         }
         terminal.draw(|frame| render(&app, frame))?;
         // Finished responses go first, so that a key typed right after
-        // another acts on the list the first one loaded.
+        // another acts on the list the first one loaded. A key typed while
+        // that list is still loading is held until it has.
         tokio::select! {
             biased;
             Some(response) = pending.next(), if !pending.is_empty() => {
                 requests = receive(&mut app, response);
             }
             event = events.next() => match event {
-                Some(Ok(event)) => {
-                    if let Some(action) = keymap::action_for_event(&app, &event) {
-                        requests = update(&mut app, action);
-                    }
-                }
+                Some(Ok(event)) => requests = handle_event(&mut app, &event),
                 Some(Err(error)) => return Err(error),
                 None => return Ok(()),
             },

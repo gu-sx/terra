@@ -7,10 +7,14 @@ publish = false
 description = "The local library: an SQLite database of tracks, albums, artists and playlists"
 
 [dependencies]
+blake3 = "1.8.7"
 icu_normalizer = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
+lofty = "0.25.5"
 sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite-bundled"] }
 terra-core = { path = "../terra-core" }
+tokio = { version = "1.54.1", default-features = false, features = ["rt"] }
+walkdir = "2.5.0"
 
 [dev-dependencies]
 tempfile = "3"
