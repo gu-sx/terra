@@ -3,6 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
+use icu_normalizer::DecomposingNormalizerBorrowed;
+use icu_properties::CodePointMapData;
+use icu_properties::props::GeneralCategory;
+
 use super::sample::{self, SampleLibrary};
 use crate::{
     Album, AlbumFilter, AlbumId, Artist, ArtistId, AudioSource, LibraryBackend, LibraryError, Page,
@@ -216,12 +220,23 @@ impl State {
     }
 }
 
-/// Splits text into lower-case words at every character that is not
-/// alphanumeric.
-fn words(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.split(|c: char| !c.is_alphanumeric())
+/// Splits text into words for search: decomposes it (NFD), drops the
+/// combining marks (general category `Mn`), lower-cases it and splits it at
+/// every character that is not alphanumeric. Dropping the marks before
+/// splitting means `é` and `e` followed by U+0301 both give `e`, and a mark
+/// never splits a word.
+fn words(text: &str) -> Vec<String> {
+    let nfd = DecomposingNormalizerBorrowed::new_nfd();
+    let category = CodePointMapData::<GeneralCategory>::new();
+    let folded: String = nfd
+        .normalize_iter(text.chars())
+        .filter(|&c| category.get(c) != GeneralCategory::NonspacingMark)
+        .collect();
+    folded
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
+        .collect()
 }
 
 /// Whether every term is a prefix of a word in one of the fields.
@@ -240,7 +255,7 @@ fn invalid_position(what: &str, position: usize, len: usize) -> LibraryError {
 
 impl LibraryBackend for MemoryLibrary {
     async fn search(&self, query: &str, limit: usize) -> Result<SearchResults, LibraryError> {
-        let terms: Vec<String> = words(query).collect();
+        let terms = words(query);
         if terms.is_empty() {
             return Ok(SearchResults::default());
         }

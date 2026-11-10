@@ -13,9 +13,16 @@
 //! "Late Shift" has the album artist "Various Artists". The tracks were
 //! added a day apart, in the order of the table.
 //!
-//! One more artist, "The Aardvarks" with the sort name "Aardvarks, The", has
-//! no tracks. It has the highest identifier, so ordering artists by sort
-//! name, by name or by identifier gives three different orders.
+//! Two more artists have no tracks:
+//!
+//! | Artist        | Sort name      | Id |
+//! | ------------- | -------------- | -- |
+//! | The Aardvarks | Aardvarks, The | 7  |
+//! | Café Ensemble | Café Ensemble  | 8  |
+//!
+//! "The Aardvarks" comes first by sort name but not by name or identifier,
+//! so ordering artists by sort name, by name or by identifier gives three
+//! different orders. "Café Ensemble" has an accent for search to ignore.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -48,6 +55,7 @@ pub fn library() -> SampleLibrary {
         ("Artist E", "Artist E"),
         ("Various Artists", "Various Artists"),
         ("The Aardvarks", "Aardvarks, The"),
+        ("Café Ensemble", "Café Ensemble"),
     ];
     let artists: Vec<Artist> = artist_names
         .iter()

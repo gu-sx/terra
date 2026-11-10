@@ -1143,6 +1143,8 @@ version = "0.1.0"
 name = "terra-core"
 version = "0.1.0"
 dependencies = [
+ "icu_normalizer",
+ "icu_properties",
  "url",
 ]
 
