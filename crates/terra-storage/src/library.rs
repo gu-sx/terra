@@ -84,7 +84,8 @@ impl LocalLibrary {
     ///
     /// It first reads, without writing, which migrations the database has.
     /// When any is missing it returns [`Error::SchemaOutdated`] and leaves
-    /// the file as it was.
+    /// the directory as it was: the database file and the absence or content
+    /// of its `-wal` and `-shm` files.
     ///
     /// # Errors
     ///
@@ -95,11 +96,7 @@ impl LocalLibrary {
     /// version's.
     pub async fn open(dir: impl AsRef<Path>) -> Result<Self, Error> {
         let path = existing_database(dir.as_ref())?;
-        let mut conn = SqliteConnectOptions::new()
-            .filename(&path)
-            .read_only(true)
-            .connect()
-            .await?;
+        let mut conn = inspection_options(&path)?.connect().await?;
         let checked = check_schema(&mut conn).await;
         conn.close().await?;
         checked?;
@@ -121,6 +118,24 @@ fn existing_database(dir: &Path) -> Result<PathBuf, Error> {
     } else {
         Err(Error::NotFound(path))
     }
+}
+
+/// Options for a connection that reads a database without changing it or
+/// its directory.
+///
+/// A read-only connection to a WAL database still creates the `-wal` and
+/// `-shm` files when they do not exist. Without a `-wal` file every
+/// committed page is in the database file, so the connection opens it as
+/// immutable, which creates neither. With one, other connections may have
+/// pages in it that only a WAL reader sees, and both files already exist.
+fn inspection_options(path: &Path) -> Result<SqliteConnectOptions, Error> {
+    let mut wal = path.as_os_str().to_owned();
+    wal.push("-wal");
+    let has_wal = Path::new(&wal).try_exists()?;
+    Ok(SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .immutable(!has_wal))
 }
 
 /// Opens a pool on an existing database, with foreign keys on and the

@@ -216,3 +216,54 @@ async fn open_and_migrate_without_a_database_are_not_found() {
     );
     assert!(!expected.exists());
 }
+
+/// The names of the files in a directory, sorted.
+fn file_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn open_an_outdated_wal_library_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let library = LocalLibrary::create(dir.path()).await.unwrap();
+    sqlx::query("DELETE FROM _sqlx_migrations")
+        .execute(&library.pool)
+        .await
+        .unwrap();
+    // Closing checkpoints the WAL and removes the -wal and -shm files.
+    library.close().await;
+    let path = dir.path().join(DATABASE_FILE);
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(file_names(dir.path()), [DATABASE_FILE]);
+
+    let result = LocalLibrary::open(dir.path()).await;
+    assert!(matches!(result, Err(Error::SchemaOutdated)), "{result:?}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "open changed the file"
+    );
+    assert_eq!(
+        file_names(dir.path()),
+        [DATABASE_FILE],
+        "open created files next to the database"
+    );
+}
+
+#[tokio::test]
+async fn open_reads_migrations_still_in_the_wal() {
+    let dir = TempDir::new().unwrap();
+    // While the creator stays open, the migrations are in the -wal file and
+    // not yet in the database file, which alone would read as outdated.
+    let creator = LocalLibrary::create(dir.path()).await.unwrap();
+    assert!(dir.path().join(format!("{DATABASE_FILE}-wal")).exists());
+
+    let opened = LocalLibrary::open(dir.path()).await;
+    assert!(opened.is_ok(), "{opened:?}");
+    creator.close().await;
+}
