@@ -8,9 +8,13 @@ description = "Domain types and the library backend trait, with no I/O and no as
 
 [features]
 # The in-memory backend, the sample library and the backend contract suite.
-testing = []
+# The ICU crates fold accents in the in-memory backend's search; a build
+# without `testing` does not depend on them.
+testing = ["dep:icu_normalizer", "dep:icu_properties"]
 
 [dependencies]
+icu_normalizer = { version = "2.4.0", optional = true, default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2.4.0", optional = true, default-features = false, features = ["compiled_data"] }
 url = "2.5.8"
 
 [[test]]

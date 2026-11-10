@@ -553,6 +553,25 @@ pub async fn search_ignores_case<B: LibraryBackend>(backend: B) {
     assert_eq!(various.0, names(&["Various Artists"]));
 }
 
+pub async fn search_ignores_accents<B: LibraryBackend>(backend: B) {
+    // The precomposed é (U+00E9) and e followed by a combining acute accent
+    // (U+0301) are the same letter, and both match a plain e.
+    for query in ["cafe", "CAFE", "café", "CAFÉ", "caf", "cafe\u{301}"] {
+        let found = search_names(&backend, query, 10).await;
+        assert!(
+            found.0.contains(&"Café Ensemble".to_owned()),
+            "{query:?} found the artists {:?}",
+            found.0
+        );
+    }
+    let found = search_names(&backend, "ártist a", 10).await;
+    assert!(
+        found.0.contains(&"Artist A".to_owned()),
+        "\"ártist a\" found the artists {:?}",
+        found.0
+    );
+}
+
 pub async fn search_matches_the_artist<B: LibraryBackend>(backend: B) {
     assert_eq!(
         search_names(&backend, "artist c", 10).await,
@@ -642,6 +661,7 @@ pub async fn list_artists_orders_by_sort_name<B: LibraryBackend>(backend: B) {
             "Artist C",
             "Artist D",
             "Artist E",
+            "Café Ensemble",
             "Various Artists"
         ]
     );

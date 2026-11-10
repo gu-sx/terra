@@ -198,6 +198,7 @@ fn keys_reach_artist_album_tracks_and_back() {
             "Artist C",
             "Artist D",
             "Artist E",
+            "Café Ensemble",
             "Various Artists"
         ]
     );

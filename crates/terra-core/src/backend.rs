@@ -39,11 +39,14 @@ use crate::source::AudioSource;
 ///   ordered by identifier, ascending.
 /// - **Limits.** A `limit` of 0 returns an empty list.
 /// - **Search.** A query is split into terms at every character that is not
-///   alphanumeric. A record matches when every term is, ignoring case, a
-///   prefix of a word in one of the record's searched fields, where the
-///   fields are split into words the same way. A query without terms matches
-///   nothing. Whether accents are ignored (so that `e` matches `é`) is not
-///   part of the contract yet.
+///   alphanumeric. A record matches when every term is a prefix of a word in
+///   one of the record's searched fields, where the fields are split into
+///   words the same way. Terms and words are compared ignoring case and
+///   ignoring diacritics on Latin letters: a precomposed letter (`é`,
+///   U+00E9) and the same letter written as a base letter and a combining
+///   mark (`e` and U+0301) match each other and `e`, and a combining mark
+///   does not split a word. A query without terms matches nothing. What
+///   happens to diacritics in other scripts is not part of the contract.
 pub trait LibraryBackend: Send + Sync {
     /// Searches artists, albums and tracks.
     ///
