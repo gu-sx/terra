@@ -12,6 +12,9 @@
 //! in order once [`receive`] has loaded the list or failed to, so that each
 //! key acts on the list it was typed for. Quit and back act at once, and back
 //! drops the held keys, as does leaving the screen in any other way.
+//!
+//! Quit waits for the playlist edits that are still outstanding, unless it is
+//! pressed again; meanwhile every other key is ignored.
 
 use std::collections::VecDeque;
 
@@ -307,7 +310,12 @@ pub struct App {
     /// The result of the last edit, until the next key.
     pub status: Option<Status>,
     pub help: bool,
+    /// Whether the TUI waits for the outstanding edits to quit.
+    pub quitting: bool,
     pub quit: bool,
+    /// The error of an edit that failed while quitting, which the TUI
+    /// returns.
+    pub(super) quit_error: Option<String>,
     /// How many rows of the main list fit on the terminal.
     pub list_height: usize,
     next_screen: ScreenId,
@@ -332,7 +340,9 @@ impl App {
             held_for: 0,
             status: None,
             help: false,
+            quitting: false,
             quit: false,
+            quit_error: None,
             list_height: 0,
             next_screen: 0,
             next_seq: 0,
@@ -584,7 +594,7 @@ impl App {
         }]
     }
 
-    fn confirm_search(&mut self) {
+    pub(super) fn confirm_search(&mut self) {
         let top = self.top_mut();
         match &mut top.search {
             Some(search) if search.is_active() => search.editing = false,
@@ -594,10 +604,17 @@ impl App {
     }
 
     /// Applies a key in the current context, or holds it while the main list
-    /// it would browse is loading, or while other keys are held.
+    /// it would browse is loading, or while other keys are held. While
+    /// quitting, only quit acts, so that no edit joins the queue.
     pub(super) fn press(&mut self, key: Key) -> Vec<Request> {
         let context = Context::of(self);
         let action = keymap::action_for_key(context, key);
+        if self.quitting {
+            return match action {
+                Some(Action::Quit) => update(self, Action::Quit),
+                _ => Vec::new(),
+            };
+        }
         let hold = !self.held.is_empty()
             || (context == Context::Browse && matches!(self.rows(), Load::Loading));
         match action {
@@ -712,7 +729,7 @@ pub fn update(app: &mut App, action: Action) -> Vec<Request> {
         }),
         Action::PromptConfirm => return app.confirm_prompt(),
         Action::PromptCancel => app.modal = None,
-        Action::Quit => app.quit = true,
+        Action::Quit => app.quit_after_edits(),
         Action::Resize { width, height } => {
             app.list_height = render::list_height(width, height);
             let height = app.list_height;

@@ -8,6 +8,9 @@
 //! playlist view are dropped, so a playlist opened meanwhile stays loading,
 //! and once the last edit is done the playlists and every open playlist load
 //! again.
+//!
+//! Quitting while edits are outstanding waits for them: the TUI quits once
+//! the last is done or one fails, or when quit is pressed again.
 
 use terra_core::{Playlist, PlaylistEntryId, PlaylistId, Track};
 
@@ -71,6 +74,10 @@ pub enum Edit {
 
 fn info(text: String) -> Option<Status> {
     Some(Status { text, error: false })
+}
+
+fn saving() -> Option<Status> {
+    info("Saving playlist changes… (q again to quit now)".to_owned())
 }
 
 impl App {
@@ -239,6 +246,29 @@ impl App {
         })
     }
 
+    /// Quits at once when no edit is outstanding or when already waiting for
+    /// them, and otherwise waits for them. The prompt and the search being
+    /// typed close, so that the status shows and `q` quits.
+    pub(super) fn quit_after_edits(&mut self) {
+        if self.edits.is_empty() || self.quitting {
+            self.quit = true;
+            return;
+        }
+        self.quitting = true;
+        self.modal = None;
+        self.help = false;
+        self.held.clear();
+        if self
+            .top()
+            .search
+            .as_ref()
+            .is_some_and(|search| search.editing)
+        {
+            self.confirm_search();
+        }
+        self.status = saving();
+    }
+
     /// Queues an edit, and starts it unless another is running.
     fn enqueue(&mut self, edit: Edit) -> Vec<Request> {
         self.edits.push_back(edit);
@@ -272,7 +302,8 @@ impl App {
 
     /// Takes the result of the running edit, starts the next one and, after
     /// the last, reloads the playlists. After an error the queued edits are
-    /// dropped, since they were made on top of the failed one.
+    /// dropped, since they were made on top of the failed one. While
+    /// quitting, the TUI quits instead of reloading, keeping the error.
     pub(super) fn finish_edit(
         &mut self,
         edit: &Edit,
@@ -309,6 +340,9 @@ impl App {
                 };
             }
             Err(error) => {
+                if self.quitting {
+                    self.quit_error = Some(error.clone());
+                }
                 self.status = Some(Status {
                     text: error,
                     error: true,
@@ -322,6 +356,13 @@ impl App {
                     }
                 }
             }
+        }
+        if self.quitting {
+            if self.edits.is_empty() {
+                self.quit = true;
+                return Vec::new();
+            }
+            self.status = saving();
         }
         match self.edits.front() {
             Some(next) => requests.push(Request::Edit(next.clone())),

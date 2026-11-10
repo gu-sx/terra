@@ -100,7 +100,7 @@ async fn event_loop<B: LibraryBackend>(
             pending.push(fetch(backend, request));
         }
         if app.quit {
-            return Ok(());
+            return exit(&app);
         }
         terminal.draw(|frame| render(&app, frame))?;
         // Finished responses go first, so that a key typed right after
@@ -117,5 +117,17 @@ async fn event_loop<B: LibraryBackend>(
                 None => return Ok(()),
             },
         }
+    }
+}
+
+/// What the TUI returns once the user has quit: the error of an edit that
+/// failed while it waited for the edits, so that it is reported after the
+/// terminal is restored.
+fn exit(app: &App) -> io::Result<()> {
+    match &app.quit_error {
+        Some(error) => Err(io::Error::other(format!(
+            "playlist changes not saved: {error}"
+        ))),
+        None => Ok(()),
     }
 }
