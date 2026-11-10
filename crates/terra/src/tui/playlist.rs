@@ -314,6 +314,13 @@ impl App {
                     error: true,
                 });
                 self.edits.clear();
+                // The open playlists show edits that did not happen: they
+                // can't be edited further until they load again.
+                for screen in &mut self.stack {
+                    if let View::Playlist(_) = screen.view {
+                        screen.rows = Load::Loading;
+                    }
+                }
             }
         }
         match self.edits.front() {

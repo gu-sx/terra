@@ -1013,9 +1013,13 @@ fn a_failed_edit_drops_the_queued_ones_and_reloads() {
             result: Err("library storage failed".to_owned()),
         },
     );
+    assert!(harness.status_line().starts_with("│library storage failed"));
+    // Until the reload arrives, the rows that showed the failed removal
+    // can't be edited.
+    assert_eq!(harness.app.rows(), &Load::Loading);
+    assert!(update(&mut harness.app, Action::MoveEntryUp).is_empty());
     harness.answer(reloads);
     assert_eq!(harness.names(), ["Midnight Drive", "Sunrise", "Last Light"]);
-    assert!(harness.status_line().starts_with("│library storage failed"));
     assert_eq!(harness.stored()[0].1.len(), 3);
 }
 
