@@ -7,6 +7,7 @@ publish = false
 description = "The local library: an SQLite database of tracks, albums, artists and playlists"
 
 [dependencies]
+icu_properties = { version = "2.4.0", default-features = false, features = ["compiled_data"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["macros", "migrate", "runtime-tokio", "sqlite-bundled"] }
 terra-core = { path = "../terra-core" }
 

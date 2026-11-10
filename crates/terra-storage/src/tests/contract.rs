@@ -22,6 +22,7 @@ macro_rules! read_cases {
 read_cases! {
     search_matches_a_prefix_of_a_title_word,
     search_ignores_case,
+    search_ignores_accents,
     search_matches_the_artist,
     search_matches_the_album,
     search_requires_every_term,

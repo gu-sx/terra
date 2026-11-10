@@ -1,10 +1,12 @@
 //! Full-text search over the sample library.
 
 use tempfile::TempDir;
+use terra_core::testing::sample;
 use terra_core::{LibraryBackend, SearchResults};
 
-use super::sample_library;
+use super::{new_track, sample_library};
 use crate::LocalLibrary;
+use crate::write::{RootId, insert_track};
 
 /// The names of what a search found: artists, albums and tracks.
 async fn found(library: &LocalLibrary, query: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
@@ -107,4 +109,38 @@ async fn fts_syntax_in_the_query_is_plain_text() {
     for query in ["\"", "*", "-", "\"\"", "\"*\"", "- * \" ^ :", "()"] {
         assert_eq!(found(&library, query).await, nothing, "{query:?}");
     }
+}
+
+#[tokio::test]
+async fn accents_on_latin_letters_are_ignored() {
+    let dir = TempDir::new().unwrap();
+    let library = sample_library(dir.path()).await;
+    // Two synthetic tracks: one title precomposed (é is U+00E9), the other
+    // decomposed (e followed by U+0301).
+    let (template, _) = &sample::library().tracks[0];
+    let mut conn = library.pool.acquire().await.unwrap();
+    for title in ["Café Lights", "Cafe\u{301} Noir"] {
+        let mut track = template.clone();
+        track.title = title.to_owned();
+        insert_track(&mut conn, &new_track(&track, RootId(1), title))
+            .await
+            .unwrap();
+    }
+    drop(conn);
+
+    let expected = (
+        names(&["Café Ensemble"]),
+        names(&[]),
+        // Ordered by lower-cased title: e (U+0065) sorts before é (U+00E9).
+        names(&["Cafe\u{301} Noir", "Café Lights"]),
+    );
+    for query in ["cafe", "CAFÉ", "cafe\u{301}", "Café", "CAFE\u{301}"] {
+        assert_eq!(found(&library, query).await, expected, "{query:?}");
+    }
+    // A combining mark inside a word does not split it.
+    assert_eq!(
+        found(&library, "cafe\u{301} lig").await.2,
+        names(&["Café Lights"])
+    );
+    assert_eq!(found(&library, "ártist c").await.0, names(&["Artist C"]));
 }

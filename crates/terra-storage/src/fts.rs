@@ -6,6 +6,8 @@
 //! search never sees a half-written record. SQL triggers could do the same,
 //! but they would hide a write from the code that makes it.
 
+use icu_properties::CodePointMapData;
+use icu_properties::props::GeneralCategory;
 use sqlx::SqliteConnection;
 use terra_core::{AlbumId, ArtistId, TrackId};
 
@@ -89,14 +91,22 @@ pub(crate) async fn sync_artist(conn: &mut SqliteConnection, id: ArtistId) -> sq
 ///
 /// The query is split into terms as the
 /// [`LibraryBackend`](terra_core::LibraryBackend) contract says: at every
-/// character that is not alphanumeric. Each term becomes a quoted string
-/// with a prefix match, `"term"*`, and FTS5 requires all of them. Quoting
-/// means no input is read as FTS5 syntax: `NEAR`, `AND` or `col:` are plain
-/// words, and `"`, `*` and `-` never reach FTS5 at all.
+/// character that is not alphanumeric, except that a combining mark
+/// (general category `Mn`) does not split a word, so `e` followed by U+0301
+/// stays in its term. The terms keep their accents: the FTS5 tokenizer,
+/// `unicode61 remove_diacritics 2`, folds the query exactly as it folded the
+/// indexed text, which keeps the two consistent in scripts whose accents it
+/// does not remove. A term made only of marks is dropped.
+///
+/// Each term becomes a quoted string with a prefix match, `"term"*`, and
+/// FTS5 requires all of them. Quoting means no input is read as FTS5 syntax:
+/// `NEAR`, `AND` or `col:` are plain words, and `"`, `*` and `-` never reach
+/// FTS5 at all.
 pub(crate) fn match_query(query: &str) -> Option<String> {
+    let category = CodePointMapData::<GeneralCategory>::new();
     let terms: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|term| !term.is_empty())
+        .split(|c: char| !c.is_alphanumeric() && category.get(c) != GeneralCategory::NonspacingMark)
+        .filter(|term| term.chars().any(char::is_alphanumeric))
         .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
         .collect();
     (!terms.is_empty()).then(|| terms.join(" "))
@@ -117,11 +127,16 @@ mod tests {
             match_query("Été 1999").as_deref(),
             Some(r#""Été"* "1999"*"#)
         );
+        // A combining mark stays in its word; SQLite's tokenizer folds it.
+        assert_eq!(
+            match_query("e\u{301}te-cafe\u{301}").as_deref(),
+            Some("\"e\u{301}te\"* \"cafe\u{301}\"*")
+        );
     }
 
     #[test]
     fn match_query_without_terms_is_none() {
-        for query in ["", "   ", "-- !", r#""*""#] {
+        for query in ["", "   ", "-- !", r#""*""#, "\u{301}", " \u{301}\u{300} "] {
             assert_eq!(match_query(query), None, "{query:?}");
         }
     }
