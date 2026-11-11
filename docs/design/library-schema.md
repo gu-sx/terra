@@ -12,7 +12,7 @@ The scanner (issue #8) adds its algorithm to this document ("Scanning"). Playlis
 
 ## Files and lifecycle
 
-A library is a directory holding the SQLite database `library.db`. `terra-storage`'s `LocalLibrary` owns it:
+A library is a directory holding the SQLite database `library.db`, and `scan.lock` once a scan has run ("One scan at a time" below). `terra-storage`'s `LocalLibrary` owns it, and keeps the directory it was created or opened with:
 
 - `LocalLibrary::create(dir)` creates `dir` if needed and `dir/library.db`, and applies every migration. It refuses a directory that already has a `library.db`.
 - `LocalLibrary::migrate(dir)` applies the migrations the database lacks.
@@ -85,6 +85,12 @@ Each file is written in one transaction: its artist and album (found or added), 
 
 The content, not the extension, decides how a file is read: Lofty guesses the format from the file's first bytes. The scanner reads MPEG audio, FLAC, Ogg Vorbis, Opus, MP4 and WAV (PCM and floating point), and reports any other format, or a file without an audio stream, as an error.
 
+### One scan at a time
+
+Two scans of one library, such as two `terra scan` processes or the CLI next to the TUI, would each add the same new path, and one of them would fail on the unique (`root_id`, `rel_path`). So `scan` first takes an exclusive lock on `scan.lock` in the library's directory, creating the file if it is missing, with `std::fs::File::try_lock`. If another scan holds the lock, in this process or another, `scan` returns `Error::ScanInProgress` at once, before it reads the database or a folder; any other failure to open or lock the file is `Error::Io`. The scan holds the lock until it returns, on every path, whether it succeeds, fails or is dropped. The operating system releases the lock when the process ends, so a crashed scan leaves no stale lock; the file it leaves is harmless and is reused.
+
+Only `scan` takes the lock. Reading the library, `add_root` and `remove_root` do not wait for it.
+
 ### Tags and properties
 
 Each changed file's tags are mapped as follows, from the file's primary tag as Lofty names it for the format (such as ID3v2 for MP3, Vorbis comments for FLAC and Ogg, and the `ilst` atom for MP4), or its first tag when it has no primary one:
@@ -105,7 +111,7 @@ An artist or album that a scan, or `remove_root`, leaves without tracks is delet
 - A file changed without changing its size or modification time, within the file system's clock resolution, looks unchanged.
 - A root that cannot be read, or holds no audio file while some of its tracks are present, is left as it was (step 1), so that an unmounted drive's tracks are neither marked missing nor taken over by a backup copy under another root. The trade-off: a root emptied on purpose keeps its tracks, which never go missing; `remove_root` removes them. A root that still holds an audio file is walked as usual, so one whose other files were deleted marks them missing. A file moved out of a folder the walk cannot read is a new track at its new path, and the old one stays.
 - Lofty 0.25.5 does not subtract an MP3's encoder delay and padding (the LAME header's gapless fields) or an AAC file's priming samples, so their durations run long by up to about two frames: 32 ms for the 48 kHz MP3 fixture and 21 ms for the 48 kHz AAC one.
-- Nothing stops two scans of the same library from running at once; a path both add fails in one of them.
+- Only `scan` takes the scan lock, so `remove_root` can run during a scan of the same library; the scan then fails with a database error when it writes a file under the removed root.
 
 ## Metadata precedence
 

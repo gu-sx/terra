@@ -39,6 +39,10 @@ pub enum Error {
     },
     /// The library stores paths as text, and this one is not valid UTF-8.
     NonUtf8Path(PathBuf),
+    /// [`scan`](crate::LocalLibrary::scan) found another scan of the same
+    /// library running, in this process or another, and did not start. Scan
+    /// again once that one has finished.
+    ScanInProgress,
     /// Reading or writing the library's directory, or a folder to add as a
     /// root, failed.
     Io(io::Error),
@@ -68,6 +72,7 @@ impl fmt::Display for Error {
             Self::NonUtf8Path(path) => {
                 write!(f, "the path {} is not valid UTF-8", path.display())
             }
+            Self::ScanInProgress => f.write_str("another scan of the library is running"),
             Self::Io(_) => f.write_str("reading or writing a directory failed"),
             Self::Database(_) => f.write_str("the library database failed"),
         }
