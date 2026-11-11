@@ -1,8 +1,10 @@
 //! The Rodio engine, as `docs/decisions/0002-playback-engine.md` recommends:
-//! Rodio's decoders for MP3, FLAC, AAC and ALAC, [`OpusSource`] for Opus,
-//! and cpal's default ALSA output.
+//! Rodio's decoders for MP3 and FLAC, [`OpusSource`] for Opus, and cpal's
+//! default ALSA output. AAC and ALAC in M4A play through [`Mp4Source`],
+//! which applies the edit list that Rodio's decoder ignores.
 
 use std::fs::File;
+use std::io::{Read, Seek};
 use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Source};
 use terra_core::AudioSource;
 
 use super::deck::{Deck, DeckControl, Format, Track};
+use super::mp4::Mp4Source;
 use super::opus::OpusSource;
 use super::{Engine, EventSink};
 use crate::{PlayerError, QueueItemId};
@@ -161,8 +164,8 @@ impl Engine for RodioEngine {
     }
 }
 
-/// Opens a source for playback: Opus through [`OpusSource`], everything else
-/// through Rodio's decoder.
+/// Opens a source for playback: Opus through [`OpusSource`], MP4 through
+/// [`Mp4Source`], everything else through Rodio's decoder.
 fn open(source: &AudioSource) -> Result<Box<dyn Source + Send>, PlayerError> {
     let path = match source {
         AudioSource::LocalPath(path) => path,
@@ -179,7 +182,12 @@ fn open(source: &AudioSource) -> Result<Box<dyn Source + Send>, PlayerError> {
             .map(|s| Box::new(s) as Box<dyn Source + Send>)
             .map_err(failed);
     }
-    let file = File::open(path).map_err(|e| failed(e.to_string()))?;
+    let mut file = File::open(path).map_err(|e| failed(e.to_string()))?;
+    if is_mp4(&mut file).map_err(|e| failed(e.to_string()))? {
+        return Mp4Source::open(path)
+            .map(|s| Box::new(s) as Box<dyn Source + Send>)
+            .map_err(failed);
+    }
     match Decoder::try_from(file) {
         Ok(decoder) => Ok(Box::new(decoder)),
         // An Ogg file with another extension may hold Opus, which Rodio's
@@ -189,6 +197,15 @@ fn open(source: &AudioSource) -> Result<Box<dyn Source + Send>, PlayerError> {
             Err(_) => Err(failed(error.to_string())),
         },
     }
+}
+
+/// Whether `file` is an ISO media file, such as M4A: its first box is
+/// `ftyp`. Leaves `file` at its start.
+fn is_mp4(file: &mut File) -> std::io::Result<bool> {
+    let mut header = [0; 8];
+    let read = file.read_exact(&mut header);
+    file.rewind()?;
+    Ok(read.is_ok() && &header[4..] == b"ftyp")
 }
 
 fn has_extension(path: &Path, extension: &str) -> bool {

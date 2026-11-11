@@ -123,14 +123,69 @@ fn gapless_alac() {
 }
 
 #[test]
-#[ignore = "AAC in M4A is not gapless: Symphonia 0.5 ignores the MP4 edit list (#23)"]
 fn gapless_aac() {
     assert_gapless("aac.m4a");
 }
 
+/// Where `window` sits in `whole`: the offset within 2048 frames of
+/// `near` with the least squared difference.
+fn locate(whole: &[f32], window: &[f32], near: usize) -> usize {
+    let last = whole.len() - window.len();
+    let error = |at: usize| -> f64 {
+        whole[at..]
+            .iter()
+            .zip(window)
+            .map(|(a, b)| f64::from(a - b).powi(2))
+            .sum()
+    };
+    (near.saturating_sub(2048)..=(near + 2048).min(last))
+        .min_by(|&a, &b| error(a).total_cmp(&error(b)))
+        .unwrap()
+}
+
+/// A seek in AAC lands on the target: the samples after it are those at the
+/// target in the file's own decode from the start, whose timeline
+/// `gapless_aac` checks. The targets fall before, on and after AAC's
+/// 1024-frame boundaries, within the 4096-frame pre-roll, mid-file and in
+/// the last frame.
+#[test]
+fn a_seek_in_aac_lands_on_the_target() {
+    let noise = fixture("noise.aac.m4a");
+    let whole: Vec<f32> = open(&noise).unwrap().collect();
+    assert_eq!(whole.len(), 48_000);
+    for target in [0, 1, 1023, 1024, 4095, 4096, 23_456, 47_000] {
+        let mut source = open(&noise).unwrap();
+        source
+            .try_seek(frames_to_duration(target as u64, 48_000))
+            .unwrap();
+        let window: Vec<f32> = source.by_ref().take(512).collect();
+        let landed = locate(&whole, &window, target);
+        assert!(
+            landed.abs_diff(target) <= 1,
+            "seek to {target} landed at {landed}"
+        );
+        // Decoded with the frames before it, so the same as from the start.
+        let residual = whole[landed..]
+            .iter()
+            .zip(&window)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(residual < 1e-4, "seek to {target}: residual {residual}");
+        // The edit list still ends it.
+        assert_eq!(512 + source.count(), 48_000 - target, "seek to {target}");
+    }
+}
+
+#[test]
+fn a_seek_past_the_end_of_aac_ends_it() {
+    let mut source = open(&fixture("noise.aac.m4a")).unwrap();
+    source.try_seek(Duration::from_secs(10)).unwrap();
+    assert_eq!(source.next(), None);
+}
+
 #[test]
 fn each_half_decodes_to_its_length() {
-    for format in ["mp3", "flac", "opus", "alac.m4a"] {
+    for format in ["mp3", "flac", "opus", "aac.m4a", "alac.m4a"] {
         let a = play_through(&[&format!("a.{format}")]);
         let b = play_through(&[&format!("b.{format}")]);
         assert_eq!(a.len(), analysis::SPLIT, "a.{format}");
@@ -140,7 +195,7 @@ fn each_half_decodes_to_its_length() {
 
 #[test]
 fn each_format_reports_its_exact_duration() {
-    for format in ["mp3", "flac", "opus", "alac.m4a"] {
+    for format in ["mp3", "flac", "opus", "aac.m4a", "alac.m4a"] {
         let a = open(&fixture(&format!("a.{format}"))).unwrap();
         assert_eq!(
             a.total_duration(),
