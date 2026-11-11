@@ -4,9 +4,11 @@
 //! `docs/design/library-schema.md` ("Scanning") describes the algorithm.
 
 mod read;
+#[cfg(test)]
+mod tests;
 mod walk;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -22,7 +24,7 @@ use crate::write::{
     insert_root, insert_track, mark_missing, update_album, update_track,
 };
 use read::FileInfo;
-use walk::{Root, Seen};
+use walk::{Root, Seen, Walk};
 
 /// How far a scan has got, which [`LocalLibrary::scan`] reports after each
 /// file it found.
@@ -38,7 +40,8 @@ pub struct ScanProgress {
 }
 
 /// What a scan did. Each file the walk found counts once, in `added`,
-/// `updated`, `moved`, `unchanged` or `errors`.
+/// `updated`, `moved`, `unchanged` or `errors`. The known files of a root
+/// the scan could not look into count in none of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScanReport {
     /// New tracks.
@@ -48,11 +51,13 @@ pub struct ScanReport {
     /// Known files found at a new path.
     pub moved: usize,
     /// Known files the scan did not find, including those already missing
-    /// before it.
+    /// before it, except those it left as they were because it could not
+    /// look for them.
     pub missing: usize,
     /// Known files whose size and modification time are unchanged.
     pub unchanged: usize,
-    /// The paths the scan could not read or store, with the reason. The scan
+    /// The paths the scan could not read or store, with the reason, and each
+    /// root it could not read or found empty while it has tracks. The scan
     /// goes on after each.
     pub errors: Vec<(PathBuf, String)>,
 }
@@ -156,29 +161,53 @@ impl LocalLibrary {
     /// [`ScanReport::errors`], and the scan goes on. Each file is written in
     /// its own transaction, so an interrupted scan keeps what it did.
     ///
+    /// A root that cannot be read, or holds no audio file while some of its
+    /// tracks are not missing, such as an unmounted drive, is reported once
+    /// in [`ScanReport::errors`] and its files are left as they were: not
+    /// marked missing, and not taken for moved by a copy elsewhere. So are
+    /// the files under a folder that cannot be read. A root emptied on
+    /// purpose therefore keeps its tracks; [`remove_root`](Self::remove_root)
+    /// removes them.
+    ///
     /// # Errors
     ///
     /// [`Error::Database`] if the database fails, which ends the scan.
-    pub async fn scan(&self, mut progress: impl FnMut(ScanProgress)) -> Result<ScanReport, Error> {
+    pub async fn scan(&self, progress: impl FnMut(ScanProgress)) -> Result<ScanReport, Error> {
         let mut conn = self.pool.acquire().await?;
         let roots = roots(&mut conn).await?;
-        let known: Vec<Known> = sqlx::query_as(
-            "SELECT id, track_id, root_id, rel_path, size, mtime_ns, content_hash, missing_since
-             FROM media_file
-             ORDER BY id",
-        )
-        .fetch_all(&mut *conn)
-        .await?;
+        let known = known(&mut conn).await?;
         drop(conn);
 
         let walk = {
             let roots = roots.clone();
             blocking(move || walk::walk(&roots)).await?
         };
+        self.apply(&roots, &known, walk, progress).await
+    }
+
+    /// Brings the library in step with what `walk` found under `roots`,
+    /// where `known` are the files the library knew before the walk.
+    async fn apply(
+        &self,
+        roots: &[Root],
+        known: &[Known],
+        walk: Walk,
+        mut progress: impl FnMut(ScanProgress),
+    ) -> Result<ScanReport, Error> {
+        let left_alone = left_alone(roots, known, &walk);
         let mut report = ScanReport {
             errors: walk.errors,
             ..ScanReport::default()
         };
+        for (root, files) in left_alone.roots {
+            report.errors.push((
+                root.to_owned(),
+                format!(
+                    "the root could not be read or holds no audio files; \
+                     its {files} files were left as they were"
+                ),
+            ));
+        }
         let total = walk.seen.len();
         let mut done = 0;
         let mut step = |path: &Path| {
@@ -229,9 +258,15 @@ impl LocalLibrary {
         }
 
         // The known files the walk did not see may have moved. A file the
-        // walk saw is never one, so a copy is never taken for a move.
+        // walk saw is never one, so a copy is never taken for a move. Nor is
+        // a file the walk could not look for.
         let mut candidates: HashMap<&[u8], Vec<&Known>> = HashMap::new();
-        for (file, _) in known.iter().zip(&seen_files).filter(|(_, seen)| !**seen) {
+        let unseen = known
+            .iter()
+            .zip(&seen_files)
+            .zip(&left_alone.files)
+            .filter(|((_, seen), left)| !**seen && !**left);
+        for ((file, _), _) in unseen {
             candidates
                 .entry(file.content_hash.as_slice())
                 .or_default()
@@ -352,6 +387,55 @@ impl LocalLibrary {
     }
 }
 
+/// The known files a scan leaves as they were, because the walk could not
+/// look for them.
+#[derive(Debug)]
+struct LeftAlone<'a> {
+    /// The roots the walk could not read, or found no audio file under
+    /// while some of their known files were not missing, with the number of
+    /// known files each has.
+    roots: Vec<(&'a Path, usize)>,
+    /// For each known file, in order, whether it is left as it was: it is
+    /// in one of those roots, or at or under a path the walk could not read.
+    files: Vec<bool>,
+}
+
+fn left_alone<'a>(roots: &'a [Root], known: &[Known], walk: &Walk) -> LeftAlone<'a> {
+    let found: HashSet<i64> = walk.seen.iter().map(|seen| seen.root).collect();
+    let unavailable: Vec<&Root> = roots
+        .iter()
+        .filter(|root| {
+            walk.unread_roots.contains(&root.id)
+                || (!found.contains(&root.id)
+                    && known
+                        .iter()
+                        .any(|file| file.root_id == root.id && file.missing_since.is_none()))
+        })
+        .collect();
+    let paths: HashMap<i64, &Path> = roots
+        .iter()
+        .map(|root| (root.id, root.path.as_path()))
+        .collect();
+    let files = known
+        .iter()
+        .map(|file| {
+            unavailable.iter().any(|root| root.id == file.root_id)
+                || paths.get(&file.root_id).is_some_and(|root| {
+                    let path = root.join(&file.rel_path);
+                    walk.unread.iter().any(|unread| path.starts_with(unread))
+                })
+        })
+        .collect();
+    let roots = unavailable
+        .into_iter()
+        .map(|root| {
+            let files = known.iter().filter(|file| file.root_id == root.id).count();
+            (root.path.as_path(), files)
+        })
+        .collect();
+    LeftAlone { roots, files }
+}
+
 async fn roots(conn: &mut SqliteConnection) -> Result<Vec<Root>, Error> {
     let rows: Vec<(i64, String)> =
         sqlx::query_as("SELECT id, path FROM library_root ORDER BY path")
@@ -364,6 +448,16 @@ async fn roots(conn: &mut SqliteConnection) -> Result<Vec<Root>, Error> {
             path: PathBuf::from(path),
         })
         .collect())
+}
+
+async fn known(conn: &mut SqliteConnection) -> Result<Vec<Known>, Error> {
+    Ok(sqlx::query_as(
+        "SELECT id, track_id, root_id, rel_path, size, mtime_ns, content_hash, missing_since
+         FROM media_file
+         ORDER BY id",
+    )
+    .fetch_all(conn)
+    .await?)
 }
 
 /// Reads a file on a blocking thread. The inner error is the file's: a
