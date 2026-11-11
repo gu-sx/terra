@@ -36,14 +36,14 @@ const MTIME: Duration = Duration::from_secs(1_700_000_000);
 
 /// A library in one temporary folder and a music folder, its only root, in
 /// another, holding a copy of every fixture.
-struct Setup {
+pub(crate) struct Setup {
     _dir: TempDir,
     music: TempDir,
-    library: LocalLibrary,
+    pub(crate) library: LocalLibrary,
 }
 
 impl Setup {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         Self::with(FILES).await
     }
 
@@ -69,11 +69,11 @@ impl Setup {
         }
     }
 
-    fn path(&self, rel_path: &str) -> PathBuf {
+    pub(crate) fn path(&self, rel_path: &str) -> PathBuf {
         self.music.path().join(rel_path)
     }
 
-    async fn scan(&self) -> ScanReport {
+    pub(crate) async fn scan(&self) -> ScanReport {
         self.library.scan(|_| {}).await.unwrap()
     }
 
@@ -89,14 +89,14 @@ impl Setup {
             .collect()
     }
 
-    async fn track(&self, title: &str) -> Track {
+    pub(crate) async fn track(&self, title: &str) -> Track {
         let mut tracks = self.tracks().await;
         tracks
             .remove(title)
             .unwrap_or_else(|| panic!("no track {title:?} in {:?}", tracks.keys()))
     }
 
-    async fn missing_since(&self, track: &Track) -> Option<i64> {
+    pub(crate) async fn missing_since(&self, track: &Track) -> Option<i64> {
         sqlx::query_scalar("SELECT missing_since FROM media_file WHERE track_id = ?1")
             .bind(track.id.get())
             .fetch_one(&self.library.pool)
@@ -128,7 +128,7 @@ fn retag(path: &Path, step: u64, change: impl FnOnce(&mut Tag)) {
     set_mtime(path, step);
 }
 
-fn report(
+pub(crate) fn report(
     added: usize,
     updated: usize,
     moved: usize,
@@ -468,6 +468,66 @@ async fn a_missing_file_found_elsewhere_is_a_move() {
     assert_eq!(setup.missing_since(&track).await, None);
     let source = setup.library.resolve_audio_source(track.id).await.unwrap();
     assert_eq!(source, AudioSource::LocalPath(setup.path("back.m4a")));
+}
+
+#[tokio::test]
+async fn an_empty_root_with_tracks_is_left_alone() {
+    // The folder stays, as the mount point of an unmounted drive does.
+    a_root_is_left_alone(|root, parked| {
+        fs::create_dir(parked).unwrap();
+        for entry in fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            fs::rename(entry.path(), parked.join(entry.file_name())).unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_unreadable_root_is_left_alone() {
+    a_root_is_left_alone(|root, parked| fs::rename(root, parked).unwrap()).await;
+}
+
+/// Scans the fixtures, makes the music folder unavailable with `unmount`,
+/// which may move what it holds to the path it is given, and copies a file
+/// into a second root. The rescan reports the music folder once and leaves
+/// its tracks as they were, so that the copy is a new track rather than
+/// taking the original's.
+async fn a_root_is_left_alone(unmount: impl FnOnce(&Path, &Path)) {
+    let setup = Setup::new().await;
+    setup.scan().await;
+    let before = setup.tracks().await;
+    let original = &before["Tone FLAC"];
+    let root = fs::canonicalize(setup.music.path()).unwrap();
+
+    unmount(&root, &setup._dir.path().join("parked"));
+    let backup = TempDir::new().unwrap();
+    let copy = backup.path().join("tone.flac");
+    fs::copy(Path::new(FIXTURES).join("tone.flac"), &copy).unwrap();
+    set_mtime(&copy, 0);
+    setup.library.add_root(backup.path()).await.unwrap();
+
+    let mut expected = report(1, 0, 0, 0, 0);
+    expected.errors = vec![(
+        root.clone(),
+        "the root could not be read or holds no audio files; its 5 files were left as they were"
+            .to_owned(),
+    )];
+    assert_eq!(setup.scan().await, expected);
+    for track in before.values() {
+        assert_eq!(setup.missing_since(track).await, None, "{}", track.title);
+    }
+    let source = setup
+        .library
+        .resolve_audio_source(original.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        source,
+        AudioSource::LocalPath(root.join("Album A/02 tone.flac"))
+    );
+    let copies = setup.library.search("Tone FLAC", 10).await.unwrap().tracks;
+    assert_eq!(copies.len(), 2, "{copies:?}");
 }
 
 #[tokio::test]

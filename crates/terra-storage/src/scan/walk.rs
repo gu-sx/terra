@@ -32,12 +32,19 @@ pub(crate) struct Seen {
     pub(crate) mtime_ns: i64,
 }
 
-/// What a walk found: the audio files, and the paths it could not read with
-/// the reason.
+/// What a walk found: the audio files, the paths it could not read with the
+/// reason, and what it could not look into.
 #[derive(Debug, Default)]
 pub(crate) struct Walk {
     pub(crate) seen: Vec<Seen>,
     pub(crate) errors: Vec<(PathBuf, String)>,
+    /// The roots the walk could not read, or that are not directories. Their
+    /// errors are not in `errors`: the scan reports each root once.
+    pub(crate) unread_roots: Vec<i64>,
+    /// The paths below a root that the walk could not read, such as a
+    /// directory it could not list: files at or under them may be there
+    /// unseen. Each one's error is in `errors`.
+    pub(crate) unread: Vec<PathBuf>,
 }
 
 /// Walks every root without following symbolic links, skipping hidden
@@ -54,15 +61,28 @@ pub(crate) fn walk(roots: &[Root]) -> Walk {
             .filter_entry(|entry| entry.depth() == 0 || !is_hidden(entry));
         for entry in entries {
             match entry {
+                // A symbolic link to a directory is walked as a root.
+                Ok(entry) if entry.depth() == 0 => {
+                    if !entry.path().is_dir() {
+                        walk.unread_roots.push(root.id);
+                    }
+                }
                 Ok(entry) if entry.file_type().is_file() && is_audio(entry.path()) => {
                     match seen(root, &entry) {
                         Ok(seen) => walk.seen.push(seen),
-                        Err(err) => walk.errors.push((entry.into_path(), err)),
+                        Err(err) => {
+                            walk.unread.push(entry.path().to_owned());
+                            walk.errors.push((entry.into_path(), err));
+                        }
                     }
                 }
                 Ok(_) => {}
+                Err(err) if err.depth() == 0 => walk.unread_roots.push(root.id),
                 Err(err) => {
+                    // Without a path, the directory being listed is unknown,
+                    // so the whole root may hold files the walk did not see.
                     let path = err.path().unwrap_or(&root.path).to_owned();
+                    walk.unread.push(path.clone());
                     walk.errors.push((path, err.to_string()));
                 }
             }
