@@ -1,5 +1,6 @@
 //! Draws the state: a header, the sidebar and the main list, the bottom bar
-//! and, when open, the playlist picker or the help overlay.
+//! with what plays, and, when open, the queue view, the playlist picker or
+//! the help overlay.
 
 use std::time::Duration;
 
@@ -9,9 +10,11 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table};
 use terra_core::PlaylistEntry;
+use terra_player::PlaybackState;
 
 use super::app::{App, Browse, Focus, Item, Load, View, visible_offset};
 use super::keymap::{Binding, Context, KEYMAP};
+use super::playback::QueueView;
 use super::playlist::{Modal, Picker};
 
 const HEADER_HEIGHT: u16 = 3;
@@ -66,11 +69,15 @@ pub fn render(app: &App, frame: &mut Frame) {
     render_sidebar(app, frame, areas.sidebar);
     render_list(app, frame, areas.list);
     render_footer(app, frame, areas.footer);
+    if let Some(view) = &app.queue_view {
+        let body = areas.sidebar.union(areas.list);
+        render_queue(app, *view, frame, body);
+    }
     if let Some(Modal::Picker(picker)) = &app.modal {
         render_picker(app, picker, frame, frame.area());
     }
     if app.help {
-        render_help(frame, frame.area());
+        render_help(app.help_scroll, frame, frame.area());
     }
 }
 
@@ -320,9 +327,7 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(block, area);
     let [playing, progress, hints] = Layout::vertical([Constraint::Length(1); 3]).areas(inner);
 
-    frame.render_widget(Paragraph::new("■ Nothing playing").dim(), playing);
-    let bar = "░".repeat(usize::from(progress.width));
-    frame.render_widget(Paragraph::new(bar).fg(Color::DarkGray), progress);
+    render_now_playing(app, frame, playing, progress);
 
     let context = Context::of(app);
     let prompt = match (&app.modal, app.editing_search()) {
@@ -354,6 +359,106 @@ fn render_footer(app: &App, frame: &mut Frame, area: Rect) {
     } else {
         frame.render_widget(Paragraph::new(hint_line(context)), hints);
     }
+}
+
+/// The symbol of the play state.
+fn state_symbol(state: PlaybackState) -> &'static str {
+    match state {
+        PlaybackState::Playing => "▶",
+        PlaybackState::Paused => "‖",
+        PlaybackState::Stopped => "■",
+    }
+}
+
+/// The current track with the play state, its time, and the progress gauge.
+fn render_now_playing(app: &App, frame: &mut Frame, line: Rect, gauge: Rect) {
+    let width = usize::from(gauge.width);
+    let Some((track, elapsed, total)) = app.now.current() else {
+        frame.render_widget(Paragraph::new("■ Nothing playing").dim(), line);
+        let bar = "░".repeat(width);
+        frame.render_widget(Paragraph::new(bar).fg(Color::DarkGray), gauge);
+        return;
+    };
+    let time = format!("{}/{}", format_duration(elapsed), format_duration(total));
+    let time_width = u16::try_from(time.len()).unwrap_or(u16::MAX);
+    let [title_area, _, time_area] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(time_width),
+    ])
+    .areas(line);
+    let symbol = state_symbol(app.now.status.state);
+    let title = Line::from(vec![
+        Span::styled(format!("{symbol} "), Style::new().fg(ACCENT).bold()),
+        Span::raw(format!("{} — {}", track.title, track.artist.name)),
+    ]);
+    frame.render_widget(Paragraph::new(title), title_area);
+    frame.render_widget(Paragraph::new(Line::from(time).right_aligned()), time_area);
+
+    let filled = if total.is_zero() {
+        0
+    } else {
+        let ratio = elapsed.as_secs_f64() / total.as_secs_f64();
+        // Truncates: the gauge fills its last cell only at the end.
+        ((ratio.min(1.0) * width as f64) as usize).min(width)
+    };
+    let bar = Line::from(vec![
+        Span::styled("━".repeat(filled), Style::new().fg(ACCENT)),
+        Span::styled("░".repeat(width - filled), Style::new().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(bar), gauge);
+}
+
+/// The queue view: every item of the player's queue, the current one marked
+/// with the play state.
+fn render_queue(app: &App, view: QueueView, frame: &mut Frame, area: Rect) {
+    let items = &app.now.status.items;
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(Style::new().fg(ACCENT))
+        .title(match items.len() {
+            1 => " Queue: 1 track ".to_owned(),
+            count => format!(" Queue: {count} tracks "),
+        });
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    if items.is_empty() {
+        let text = "  The queue is empty. e adds the selected track, Enter plays it.";
+        frame.render_widget(Paragraph::new(text).dim(), inner);
+        return;
+    }
+    let height = usize::from(inner.height);
+    let offset = visible_offset(view.selected, 0, height);
+    let symbol = state_symbol(app.now.status.state);
+    let rows = items
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .map(|(index, item)| {
+            let selected = index == view.selected;
+            let current = app.now.status.current == Some(*item);
+            let (name, time) = match app.now.tracks.get(item) {
+                Some(track) => (
+                    format!("{} / {}", track.title, track.artist.name),
+                    format_duration(track.duration),
+                ),
+                None => ("Unknown track".to_owned(), String::new()),
+            };
+            let state = if current { symbol } else { " " };
+            let row = Row::new([
+                Cell::from(format!("{}{state} {name}", marker(selected))),
+                Cell::from(Line::from(time).right_aligned()),
+            ]);
+            match (selected, current) {
+                (true, _) => row.style(selected_style(true)),
+                (false, true) => row.style(Style::new().fg(ACCENT)),
+                (false, false) => row,
+            }
+        });
+    let widths = [Constraint::Fill(1), Constraint::Length(TIME_WIDTH)];
+    frame.render_widget(Table::new(rows, widths), inner);
 }
 
 /// A label, the text typed after it and a cursor.
@@ -441,13 +546,19 @@ pub fn help_line(binding: &Binding) -> String {
     )
 }
 
-fn render_help(frame: &mut Frame, area: Rect) {
+/// The help overlay's two columns: the browse and playback keys on the
+/// left, the rest on the right.
+fn help_columns() -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let section = |context: Context| {
         let mut lines = vec![Line::from(context.title()).fg(ACCENT).bold()];
         let typing = match context {
             Context::Search => Some("Add to the query"),
             Context::Prompt => Some("Add to the text"),
-            Context::Browse | Context::Confirm | Context::Help => None,
+            Context::Browse
+            | Context::Playback
+            | Context::Queue
+            | Context::Confirm
+            | Context::Help => None,
         };
         if let Some(typing) = typing {
             lines.push(Line::from(format!(
@@ -463,31 +574,48 @@ fn render_help(frame: &mut Frame, area: Rect) {
         );
         lines
     };
-    // The overlay's own keys go on its bottom border, under the left column.
-    let [first, rest @ .., help] = Context::ALL;
-    let left = section(first);
-    let mut right = Vec::new();
-    for context in rest {
-        if !right.is_empty() {
-            right.push(Line::default());
+    let column = |contexts: &[Context]| {
+        let mut lines = Vec::new();
+        for &context in contexts {
+            if !lines.is_empty() {
+                lines.push(Line::default());
+            }
+            lines.extend(section(context));
         }
-        right.extend(section(context));
-    }
+        lines
+    };
+    let (left, right) = Context::ALL.split_at(2);
+    (column(left), column(right))
+}
 
+/// How many lines the help overlay has.
+pub fn help_rows() -> usize {
+    let (left, right) = help_columns();
+    left.len().max(right.len())
+}
+
+/// How many lines of the help overlay fit on a terminal of this size.
+pub fn help_height(_width: u16, height: u16) -> usize {
+    let rows = u16::try_from(help_rows()).unwrap_or(u16::MAX);
+    usize::from(rows.saturating_add(2).min(height).saturating_sub(2))
+}
+
+fn render_help(scroll: usize, frame: &mut Frame, area: Rect) {
+    let (left, right) = help_columns();
     let rows = u16::try_from(left.len().max(right.len())).unwrap_or(u16::MAX);
     let popup = centered(area, 78, rows.saturating_add(2));
-    let mut block = Block::bordered()
+    let block = Block::bordered()
         .border_type(BorderType::Thick)
         .border_style(Style::new().fg(ACCENT))
-        .title(format!(" {} ", help.title()));
-    for binding in KEYMAP.iter().filter(|binding| binding.context == help) {
-        block = block.title_bottom(help_line(binding));
-    }
+        .title(" HELP ")
+        .title_bottom(" j k scroll  ? Esc q close ");
     let inner = block.inner(popup);
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(inner);
+    let left: Vec<Line> = left.into_iter().skip(scroll).collect();
+    let right: Vec<Line> = right.into_iter().skip(scroll).collect();
     frame.render_widget(Paragraph::new(left), left_area);
     frame.render_widget(Paragraph::new(right), right_area);
 }

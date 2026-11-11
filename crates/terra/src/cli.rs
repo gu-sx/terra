@@ -9,16 +9,29 @@ use std::fmt;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+use std::sync::mpsc;
+
 use clap::{Args, Parser, Subcommand};
 use etcetera::BaseStrategy;
+use terra_player::{Output, Player, PlayerEvent};
 use terra_storage::{Error as StorageError, LocalLibrary, ScanProgress, ScanReport};
 use tokio::runtime::Runtime;
 
 use crate::backend::Backend;
-use crate::tui::{self, App};
+use crate::tui::{self, App, NoPlayer, Playback};
 
 /// The environment variable that names the library directory.
 pub const LIBRARY_ENV: &str = "TERRA_LIBRARY";
+
+/// The environment variable that chooses the audio output: unset or empty
+/// for the default device, `null` for none, which plays in real time and
+/// discards the audio, for a run without a sound card. It is not in the
+/// help, since only tests and headless runs need it.
+pub const AUDIO_OUTPUT_ENV: &str = "TERRA_AUDIO_OUTPUT";
+
+/// The device name plays are recorded under when the host name cannot be
+/// read.
+const UNKNOWN_DEVICE: &str = "unknown";
 
 /// A keyboard-first music library and player.
 ///
@@ -83,6 +96,8 @@ pub enum Error {
     AddRoot(PathBuf, StorageError),
     /// `root remove` was given a folder that is not a root.
     NotARoot(PathBuf),
+    /// [`AUDIO_OUTPUT_ENV`] has a value other than `null`.
+    AudioOutput(OsString),
     /// The terminal or the runtime failed.
     Io(io::Error),
 }
@@ -110,6 +125,11 @@ impl fmt::Display for Error {
                 write_chain(f, error)
             }
             Self::NotARoot(dir) => write!(f, "{} is not a library root", dir.display()),
+            Self::AudioOutput(value) => write!(
+                f,
+                "{AUDIO_OUTPUT_ENV} is {}; leave it unset for the default device, or set it to null",
+                value.display()
+            ),
             Self::Io(error) => write_chain(f, error),
         }
     }
@@ -144,7 +164,8 @@ impl Cli {
             .command
             .unwrap_or(Command::Tui(TuiArgs { demo: false }));
         if let Command::Tui(TuiArgs { demo: true }) = command {
-            return Ok(tui::run_demo(&runtime)?);
+            let (app, events) = tui_app("demo library", env::var_os(AUDIO_OUTPUT_ENV))?;
+            return Ok(tui::run_demo(&runtime, app, events)?);
         }
         let dir = library_dir(self.library, env::var_os(LIBRARY_ENV), || {
             etcetera::choose_base_strategy()
@@ -338,13 +359,44 @@ impl Progress {
 
 /// Opens the local library in the TUI.
 fn run_tui(runtime: &Runtime, dir: &Path) -> Result<(), Error> {
+    let (app, events) = tui_app(dir.display().to_string(), env::var_os(AUDIO_OUTPUT_ENV))?;
     let library = runtime
         .block_on(LocalLibrary::open(dir))
         .map_err(|error| Error::Library(dir.to_owned(), error))?;
     let backend = Backend::Local(library);
-    let result = tui::run(runtime, &backend, App::new(dir.display().to_string()));
+    let result = tui::run(runtime, &backend, app, events);
     runtime.block_on(backend.close());
     Ok(result?)
+}
+
+/// The TUI for the library named `library`, with a player on the output
+/// [`AUDIO_OUTPUT_ENV`] chose, and the player's events. A player that
+/// cannot open its output leaves the TUI without playback, which says why
+/// when it starts and on each playback key.
+fn tui_app(
+    library: impl Into<String>,
+    output: Option<OsString>,
+) -> Result<(App, mpsc::Receiver<PlayerEvent>), Error> {
+    let output = audio_output(output)?;
+    let (player, events): (Box<dyn Playback>, _) = match Player::open(output) {
+        Ok((player, events)) => (Box::new(player), events),
+        Err(error) => (Box::new(NoPlayer(error)), mpsc::channel().1),
+    };
+    let device = whoami::hostname()
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| UNKNOWN_DEVICE.to_owned());
+    Ok((App::new(library, player, device), events))
+}
+
+/// The output that the value of [`AUDIO_OUTPUT_ENV`] names.
+fn audio_output(value: Option<OsString>) -> Result<Output, Error> {
+    match value {
+        None => Ok(Output::Device),
+        Some(value) if value.is_empty() => Ok(Output::Device),
+        Some(value) if value == "null" => Ok(Output::Null),
+        Some(value) => Err(Error::AudioOutput(value)),
+    }
 }
 
 #[cfg(test)]
@@ -381,6 +433,19 @@ mod tests {
         let error = library_dir(None, None, || None).unwrap_err();
         assert!(matches!(error, Error::NoLibraryDir));
         assert!(error.to_string().contains("--library"));
+    }
+
+    #[test]
+    fn audio_output_is_the_device_unless_null_is_asked_for() {
+        assert_eq!(audio_output(None).unwrap(), Output::Device);
+        assert_eq!(audio_output(Some(OsString::new())).unwrap(), Output::Device);
+        assert_eq!(
+            audio_output(Some(OsString::from("null"))).unwrap(),
+            Output::Null
+        );
+        let error = audio_output(Some(OsString::from("pulse"))).unwrap_err();
+        assert!(matches!(error, Error::AudioOutput(_)));
+        assert!(error.to_string().contains("TERRA_AUDIO_OUTPUT is pulse"));
     }
 
     #[test]

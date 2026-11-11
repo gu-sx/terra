@@ -1,6 +1,9 @@
 //! Tests of the TUI against the synthetic sample library, without a
 //! terminal: keys go through the keymap and `update`, requests run on
-//! `block_on`, and the screen renders to Ratatui's `TestBackend`.
+//! `block_on`, and the screen renders to Ratatui's `TestBackend`. The player
+//! is a fake that records its commands, unless a test gives another.
+
+mod playback;
 
 use std::time::Duration;
 
@@ -19,24 +22,40 @@ use super::app::{
 };
 use super::fetch::fetch;
 use super::keymap::{self, Context, KEYMAP};
+use super::playback::Playback;
 use super::playlist::Modal;
 use super::render::{format_duration, help_line, render};
 
 const WIDTH: u16 = 80;
 const HEIGHT: u16 = 24;
 
+/// The device name plays are recorded under in the tests.
+const DEVICE: &str = "test-host";
+
 /// A TUI on an 80×24 terminal over a library, with every request answered
 /// before the next key.
 struct Harness {
     app: App,
     library: MemoryLibrary,
+    /// The fake player the TUI commands, unless it was given another.
+    player: playback::FakePlayer,
 }
 
 impl Harness {
     fn new(library: MemoryLibrary) -> Self {
+        let player = playback::FakePlayer::default();
+        Self::with_player(library, Box::new(player.clone()), player)
+    }
+
+    fn with_player(
+        library: MemoryLibrary,
+        playback: Box<dyn Playback>,
+        player: playback::FakePlayer,
+    ) -> Self {
         let mut harness = Self {
-            app: App::new("test library"),
+            app: App::new("test library", playback, DEVICE),
             library,
+            player,
         };
         harness.dispatch(Action::Resize {
             width: WIDTH,
@@ -486,7 +505,17 @@ fn help_overlay_lists_every_keymap_entry() {
     let mut harness = Harness::sample();
     harness.type_text("?");
     assert!(harness.app.help);
-    let screen = harness.screen();
+    // The overlay is taller than the terminal: `j` scrolls it to its end.
+    let mut screen = harness.screen();
+    loop {
+        harness.type_text("j");
+        let next = harness.screen();
+        if next.iter().all(|row| screen.contains(row)) {
+            break;
+        }
+        screen.extend(next);
+    }
+    assert!(harness.app.help_scroll > 0);
     for binding in KEYMAP {
         let line = help_line(binding);
         assert!(
@@ -498,6 +527,11 @@ fn help_overlay_lists_every_keymap_entry() {
     for context in Context::ALL {
         row_of(&screen, context.title());
     }
+    harness.type_text("g");
+    let scrolled = harness.app.help_scroll;
+    harness.type_text("kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk");
+    assert_eq!(harness.app.help_scroll, 0);
+    assert!(scrolled > 0);
 
     // Keys other than the help bindings do nothing while it is open, and
     // `q` closes it rather than quitting.
@@ -524,6 +558,31 @@ fn no_key_has_two_bindings_in_one_context() {
                     );
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn playback_keys_are_not_shadowed_where_they_apply() {
+    let playback = KEYMAP
+        .iter()
+        .filter(|binding| binding.context == Context::Playback);
+    for binding in playback {
+        for key in binding.keys {
+            for context in [Context::Browse, Context::Queue] {
+                assert_eq!(
+                    keymap::action_for_key(context, *key),
+                    Some(binding.action),
+                    "{} does not reach the player in {context:?}",
+                    key.name()
+                );
+            }
+            assert_eq!(keymap::action_for_key(Context::Search, *key), {
+                let KeyCode::Char(c) = key.code else {
+                    unreachable!()
+                };
+                Some(Action::SearchInput(c))
+            });
         }
     }
 }

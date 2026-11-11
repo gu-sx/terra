@@ -25,6 +25,18 @@ async fn load<B: LibraryBackend>(backend: &B, request: &Request) -> Result<Paylo
             return backend.list_playlists().await.map(Payload::Playlists);
         }
         Request::Edit(edit) => return run_edit(backend, edit).await,
+        Request::Resolve { tracks, .. } => {
+            let mut sources = Vec::with_capacity(tracks.len());
+            for track in tracks {
+                let source = backend.resolve_audio_source(track.id).await;
+                sources.push(source.map_err(|error| error.to_string()));
+            }
+            return Ok(Payload::Sources(sources));
+        }
+        Request::RecordPlay { track, device, at } => {
+            backend.record_play(track.id, device, *at).await?;
+            return Ok(Payload::Done);
+        }
         Request::Screen { view, .. } => load_view(backend, *view).await?,
         Request::Search { query, .. } => {
             let results = backend.search(query, SEARCH_LIMIT).await?;

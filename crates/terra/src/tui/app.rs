@@ -15,16 +15,21 @@
 //!
 //! Quit waits for the playlist edits that are still outstanding, unless it is
 //! pressed again; meanwhile every other key is ignored.
+//!
+//! The playback keys act at once, even while a list loads, and the player's
+//! events reach the state through [`player_event`](super::playback::player_event).
 
 use std::collections::VecDeque;
+use std::time::{Duration, SystemTime};
 
 use crossterm::event::{Event, KeyEventKind};
 use terra_core::{
-    Album, AlbumFilter, AlbumKind, Artist, ArtistId, Playlist, PlaylistEntry, PlaylistId, Track,
-    TrackFilter,
+    Album, AlbumFilter, AlbumKind, Artist, ArtistId, AudioSource, Playlist, PlaylistEntry,
+    PlaylistId, Track, TrackFilter,
 };
 
 use super::keymap::{self, Context, Key};
+use super::playback::{Job, NowPlaying, Playback, QueueView, Queueing};
 use super::playlist::{Edit, Modal};
 use super::render;
 
@@ -203,7 +208,8 @@ pub enum Action {
     ToggleFocus,
     FocusSidebar,
     FocusList,
-    /// Opens the selected entry: a sidebar view, an artist or an album.
+    /// Opens the selected entry: a sidebar view, an artist or an album. On
+    /// a track, plays it and queues the tracks after it in the list.
     Open,
     /// Clears the search, or goes back one level.
     Back,
@@ -233,6 +239,23 @@ pub enum Action {
     /// Accepts the prompt: the name, the deletion or the picked playlist.
     PromptConfirm,
     PromptCancel,
+    /// Adds the selected track at the end of the queue.
+    QueueTrack,
+    /// Adds the selected track to play after the current one.
+    PlayNext,
+    /// Opens or closes the queue view.
+    ToggleQueue,
+    /// Pauses or resumes.
+    TogglePause,
+    NextTrack,
+    PreviousTrack,
+    /// Seeks this many seconds forward or back in the current track.
+    Seek {
+        forward: bool,
+        seconds: u64,
+    },
+    VolumeUp,
+    VolumeDown,
     Quit,
     /// The terminal has this many columns and rows.
     Resize {
@@ -258,6 +281,34 @@ pub enum Request {
         query: String,
     },
     Edit(Edit),
+    /// Where the audio of these tracks is, for a playback job.
+    Resolve {
+        job: u64,
+        tracks: Vec<Track>,
+    },
+    /// Records that the device played the track.
+    RecordPlay {
+        track: Track,
+        device: String,
+        at: SystemTime,
+    },
+}
+
+impl Action {
+    /// Whether the action drives the player, so that it acts at once rather
+    /// than wait for a list to load.
+    pub fn is_playback(self) -> bool {
+        matches!(
+            self,
+            Self::ToggleQueue
+                | Self::TogglePause
+                | Self::NextTrack
+                | Self::PreviousTrack
+                | Self::Seek { .. }
+                | Self::VolumeUp
+                | Self::VolumeDown
+        )
+    }
 }
 
 /// What the backend returned for a request.
@@ -269,6 +320,9 @@ pub enum Payload {
     Playlist(Playlist),
     /// An edit that returns nothing succeeded.
     Done,
+    /// The audio source of each track of a [`Request::Resolve`], in order,
+    /// or the backend's error.
+    Sources(Vec<Result<AudioSource, String>>),
 }
 
 /// A message for the status line.
@@ -286,7 +340,6 @@ pub struct Response {
 }
 
 /// The whole state of the TUI.
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct App {
     /// Names the library the TUI is connected to.
     pub library: String,
@@ -310,6 +363,19 @@ pub struct App {
     /// The result of the last edit, until the next key.
     pub status: Option<Status>,
     pub help: bool,
+    /// How many lines the help overlay is scrolled down.
+    pub help_scroll: usize,
+    /// How many lines of the help overlay fit on the terminal.
+    pub(super) help_height: usize,
+    /// The player, which the playback keys command.
+    pub(super) player: Box<dyn Playback>,
+    /// The name plays are recorded under: this machine's.
+    pub(super) device: String,
+    pub now: NowPlaying,
+    /// The playback jobs not yet done, in order. The first is running.
+    pub(super) jobs: VecDeque<Job>,
+    /// The queue view, while it is open.
+    pub queue_view: Option<QueueView>,
     /// Whether the TUI waits for the outstanding edits to quit.
     pub quitting: bool,
     pub quit: bool,
@@ -324,9 +390,14 @@ pub struct App {
 }
 
 impl App {
-    /// A TUI connected to the library named `library`, showing all tracks.
-    /// Nothing is loaded until [`Action::Start`].
-    pub fn new(library: impl Into<String>) -> Self {
+    /// A TUI connected to the library named `library`, showing all tracks,
+    /// that plays on `player` and records plays as `device`. Nothing is
+    /// loaded until [`Action::Start`].
+    pub fn new(
+        library: impl Into<String>,
+        player: Box<dyn Playback>,
+        device: impl Into<String>,
+    ) -> Self {
         let mut app = Self {
             library: library.into(),
             focus: Focus::List,
@@ -340,6 +411,13 @@ impl App {
             held_for: 0,
             status: None,
             help: false,
+            help_scroll: 0,
+            help_height: 0,
+            player,
+            device: device.into(),
+            now: NowPlaying::new(),
+            jobs: VecDeque::new(),
+            queue_view: None,
             quitting: false,
             quit: false,
             quit_error: None,
@@ -487,11 +565,20 @@ impl App {
     /// Moves the focused pane's selection with `to`, which gets the current
     /// selection and the length of the list.
     fn move_selection(&mut self, to: impl FnOnce(usize, usize) -> usize) {
+        if self.help {
+            let max = render::help_rows().saturating_sub(self.help_height);
+            self.help_scroll = to(self.help_scroll, max + 1).min(max);
+            return;
+        }
         if let Some(Modal::Picker(picker)) = &self.modal {
             let len = picker.matches(self.playlist_list()).len();
             if let Some(Modal::Picker(picker)) = &mut self.modal {
                 picker.selected = to(picker.selected, len).min(len.saturating_sub(1));
             }
+            return;
+        }
+        if self.queue_view.is_some() {
+            self.move_queue_selection(to);
             return;
         }
         match self.focus {
@@ -537,8 +624,8 @@ impl App {
                         });
                         self.push(title, view)
                     }
-                    // Playing a track comes with playback.
-                    Some(Item::Track(_) | Item::Entry(_)) | None => return Vec::new(),
+                    Some(Item::Track(_) | Item::Entry(_)) => return self.play_from_selected(),
+                    None => return Vec::new(),
                 };
                 let parent = self.stack.len() - 2;
                 if let Some(search) = &mut self.stack[parent].search {
@@ -623,6 +710,7 @@ impl App {
                 update(self, Action::Back)
             }
             Some(Action::Quit) => update(self, Action::Quit),
+            Some(action) if action.is_playback() => update(self, action),
             _ if hold => {
                 if self.held.is_empty() {
                     self.held_for = self.top().id;
@@ -678,6 +766,7 @@ pub fn update(app: &mut App, action: Action) -> Vec<Request> {
     }
     match action {
         Action::Start => {
+            app.refresh();
             let top = app.top();
             return vec![
                 Request::Playlists {
@@ -715,11 +804,17 @@ pub fn update(app: &mut App, action: Action) -> Vec<Request> {
         }
         Action::ConfirmSearch => app.confirm_search(),
         Action::ClearSearch => app.top_mut().search = None,
-        Action::ToggleHelp => app.help = !app.help,
+        Action::ToggleHelp => {
+            app.help = !app.help;
+            app.help_scroll = 0;
+        }
         Action::NewPlaylist => app.new_playlist(),
         Action::RenamePlaylist => app.rename_playlist(),
         Action::DeletePlaylist => app.delete_playlist(),
         Action::AddToPlaylist => app.pick_playlist(),
+        Action::RemoveEntry if app.queue_view.is_some() => app.remove_queued(),
+        Action::MoveEntryDown if app.queue_view.is_some() => app.move_queued(true),
+        Action::MoveEntryUp if app.queue_view.is_some() => app.move_queued(false),
         Action::RemoveEntry => return app.remove_entry(),
         Action::MoveEntryDown => return app.move_entry(true),
         Action::MoveEntryUp => return app.move_entry(false),
@@ -729,9 +824,23 @@ pub fn update(app: &mut App, action: Action) -> Vec<Request> {
         }),
         Action::PromptConfirm => return app.confirm_prompt(),
         Action::PromptCancel => app.modal = None,
+        Action::QueueTrack => return app.queue_selected(Queueing::Append),
+        Action::PlayNext => return app.queue_selected(Queueing::Next),
+        Action::ToggleQueue => app.toggle_queue(),
+        Action::TogglePause => app.toggle_pause(),
+        Action::NextTrack => app.skip(true),
+        Action::PreviousTrack => app.skip(false),
+        Action::Seek { forward, seconds } => {
+            app.seek_by(Duration::from_secs(seconds), forward);
+        }
+        Action::VolumeUp => app.change_volume(true),
+        Action::VolumeDown => app.change_volume(false),
         Action::Quit => app.quit_after_edits(),
         Action::Resize { width, height } => {
             app.list_height = render::list_height(width, height);
+            app.help_height = render::help_height(width, height);
+            let max = render::help_rows().saturating_sub(app.help_height);
+            app.help_scroll = app.help_scroll.min(max);
             let height = app.list_height;
             for screen in &mut app.stack {
                 screen.cursor.offset = visible_offset(screen.cursor.selected, 0, height);
@@ -814,6 +923,15 @@ fn store(app: &mut App, response: Response) -> Vec<Request> {
             }
         }
         Request::Edit(edit) => return app.finish_edit(&edit, result),
+        Request::Resolve { job, tracks } => return app.finish_resolve(job, tracks, result),
+        Request::RecordPlay { track, .. } => {
+            if let Err(error) = result {
+                app.status = Some(Status {
+                    text: format!("Could not record the play of “{}”: {error}", track.title),
+                    error: true,
+                });
+            }
+        }
     }
     Vec::new()
 }
