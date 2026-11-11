@@ -77,7 +77,6 @@ fn info(text: String) -> Option<Status> {
     Some(Status { text, error: false })
 }
 
-
 impl App {
     /// The playlist selected in the sidebar, if a playlist is.
     pub fn sidebar_playlist(&self) -> Option<&Playlist> {
