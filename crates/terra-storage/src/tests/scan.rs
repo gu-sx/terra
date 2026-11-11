@@ -3,9 +3,9 @@
 
 use std::collections::HashMap;
 use std::error::Error as _;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use std::{fs, io};
 
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
@@ -418,34 +418,63 @@ async fn an_empty_root_with_tracks_is_left_alone() {
 
 #[tokio::test]
 async fn an_unreadable_root_is_left_alone() {
-    a_root_is_left_alone(|root, parked| fs::rename(root, parked).unwrap()).await;
+    // The folder is gone, and the entry says so in the system's words.
+    a_root_is_left_alone_because(|root, parked| {
+        fs::rename(root, parked).unwrap();
+        let err = fs::metadata(root).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        Some(err.to_string())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_root_that_is_not_a_directory_is_left_alone() {
+    a_root_is_left_alone_because(|root, parked| {
+        fs::rename(root, parked).unwrap();
+        fs::write(root, b"not a folder").unwrap();
+        Some(io::Error::from(io::ErrorKind::NotADirectory).to_string())
+    })
+    .await;
+}
+
+/// [`a_root_is_left_alone_because`] for a root the walk reads, so that its
+/// entry gives no cause.
+async fn a_root_is_left_alone(unmount: impl FnOnce(&Path, &Path)) {
+    a_root_is_left_alone_because(|root, parked| {
+        unmount(root, parked);
+        None
+    })
+    .await;
 }
 
 /// Scans the fixtures, makes the music folder unavailable with `unmount`,
 /// which may move what it holds to the path it is given, and copies a file
-/// into a second root. The rescan reports the music folder once and leaves
-/// its tracks as they were, so that the copy is a new track rather than
-/// taking the original's.
-async fn a_root_is_left_alone(unmount: impl FnOnce(&Path, &Path)) {
+/// into a second root. The rescan reports the music folder once, ending
+/// with the cause `unmount` returns if any, and leaves its tracks as they
+/// were, so that the copy is a new track rather than taking the original's.
+async fn a_root_is_left_alone_because(unmount: impl FnOnce(&Path, &Path) -> Option<String>) {
     let setup = Setup::new().await;
     setup.scan().await;
     let before = setup.tracks().await;
     let original = &before["Tone FLAC"];
     let root = fs::canonicalize(setup.music.path()).unwrap();
 
-    unmount(&root, &setup.dir.path().join("parked"));
+    let cause = unmount(&root, &setup.dir.path().join("parked"));
     let backup = TempDir::new().unwrap();
     let copy = backup.path().join("tone.flac");
     fs::copy(Path::new(FIXTURES).join("tone.flac"), &copy).unwrap();
     set_mtime(&copy, 0);
     setup.library.add_root(backup.path()).await.unwrap();
 
-    let mut expected = report(1, 0, 0, 0, 0);
-    expected.errors = vec![(
-        root.clone(),
+    let mut message =
         "the root could not be read or holds no audio files; its 5 files were left as they were"
-            .to_owned(),
-    )];
+            .to_owned();
+    if let Some(cause) = cause {
+        message = format!("{message}: {cause}");
+    }
+    let mut expected = report(1, 0, 0, 0, 0);
+    expected.errors = vec![(root.clone(), message)];
     assert_eq!(setup.scan().await, expected);
     for track in before.values() {
         assert_eq!(setup.missing_since(track).await, None, "{}", track.title);
