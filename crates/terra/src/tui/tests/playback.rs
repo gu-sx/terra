@@ -29,6 +29,7 @@ pub enum Command {
     InsertNext(AudioSource),
     Remove(QueueItemId),
     MoveTo(QueueItemId, usize),
+    Clear,
     Toggle,
     Resume,
     Next,
@@ -115,6 +116,13 @@ impl Playback for FakePlayer {
         self.record(Command::MoveTo(item, index))
             .queue
             .move_to(item, index);
+        Ok(())
+    }
+
+    fn clear(&mut self) -> Result<(), PlayerError> {
+        let mut state = self.record(Command::Clear);
+        state.queue.clear();
+        state.state = PlaybackState::Stopped;
         Ok(())
     }
 
@@ -586,6 +594,39 @@ fn a_track_the_backend_cannot_resolve_is_reported_and_skipped() {
         ]
     );
     assert!(row_of(&harness.screen(), "Cannot play “After Hours”") > 19);
+}
+
+#[test]
+fn enter_on_tracks_none_of_which_resolve_empties_the_queue() {
+    let mut harness = Harness::sample();
+    harness.select("Sunrise");
+    harness.press(KeyCode::Enter);
+    harness.player.commands();
+    assert_eq!(harness.queue().len(), 6);
+
+    // The last track of the list, whose file is missing.
+    harness.select("Demo Tape");
+    let requests = harness.press_unanswered(KeyCode::Enter);
+    let [Request::Resolve { job, tracks }] = &requests[..] else {
+        panic!("one resolve: {requests:?}");
+    };
+    let response = Response {
+        request: Request::Resolve {
+            job: *job,
+            tracks: tracks.clone(),
+        },
+        result: Ok(Payload::Sources(vec![
+            Err("the file is missing".to_owned()),
+        ])),
+    };
+    let requests = receive(&mut harness.app, response);
+    assert!(requests.is_empty());
+    assert_eq!(harness.player.commands(), [Command::Clear]);
+    assert_eq!(harness.queue(), []);
+    assert_eq!(harness.app.now.status.state, PlaybackState::Stopped);
+    let status = harness.app.status.clone().unwrap();
+    assert_eq!(status.text, "Cannot play “Demo Tape”: the file is missing");
+    assert!(harness.screen()[20].starts_with("│■ Nothing playing"));
 }
 
 #[test]

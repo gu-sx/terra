@@ -42,6 +42,8 @@ pub trait Playback {
     fn insert_next(&mut self, source: AudioSource) -> Result<QueueItemId, PlayerError>;
     fn remove(&mut self, item: QueueItemId) -> Result<(), PlayerError>;
     fn move_to(&mut self, item: QueueItemId, index: usize) -> Result<(), PlayerError>;
+    /// Empties the queue and stops.
+    fn clear(&mut self) -> Result<(), PlayerError>;
     fn toggle(&mut self) -> Result<(), PlayerError>;
     fn resume(&mut self) -> Result<(), PlayerError>;
     fn next(&mut self) -> Result<(), PlayerError>;
@@ -71,6 +73,10 @@ impl Playback for Player {
 
     fn move_to(&mut self, item: QueueItemId, index: usize) -> Result<(), PlayerError> {
         Player::move_to(self, item, index)
+    }
+
+    fn clear(&mut self) -> Result<(), PlayerError> {
+        Player::clear(self)
     }
 
     fn toggle(&mut self) -> Result<(), PlayerError> {
@@ -124,6 +130,10 @@ impl Playback for NoPlayer {
     }
 
     fn move_to(&mut self, _: QueueItemId, _: usize) -> Result<(), PlayerError> {
+        Err(self.0.clone())
+    }
+
+    fn clear(&mut self) -> Result<(), PlayerError> {
         Err(self.0.clone())
     }
 
@@ -289,11 +299,16 @@ impl App {
     }
 
     /// Asks for the next tracks of the first job: one at a time until a
-    /// replacing job has started, then all the rest.
+    /// replacing job has started, then all the rest. A replacing job none of
+    /// whose tracks could be queued still replaces the queue: it empties it.
     fn resolve_next(&mut self) -> Vec<Request> {
         while let Some(job) = self.jobs.front_mut() {
             if job.tracks.is_empty() {
+                let unstarted = job.how == Queueing::Replace && !job.started;
                 self.jobs.pop_front();
+                if unstarted {
+                    self.command(|player| player.clear());
+                }
                 continue;
             }
             let count = match (job.how, job.started) {
