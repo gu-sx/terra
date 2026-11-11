@@ -25,6 +25,18 @@ tone tone.mp3 -c:a libmp3lame -b:a 32k \
     -metadata title="Tone MP3" -metadata artist="Artist A" \
     -metadata album="Album A" -metadata track=1 -metadata date=2001
 
+# At 22.05 kHz an MP3 frame holds 576 samples, so the encoder delay and
+# padding are a larger share of the length.
+RATE=22050
+tone tone-22k.mp3 -c:a libmp3lame -b:a 32k \
+    -metadata title="Tone MP3 22 kHz" -metadata artist="Artist A"
+
+# No Xing/LAME frame, so no gapless fields: the scanner keeps Lofty's
+# duration.
+RATE=48000
+tone tone-no-xing.mp3 -c:a libmp3lame -b:a 32k -write_xing 0 \
+    -metadata title="Tone MP3 without Xing" -metadata artist="Artist A"
+
 RATE=8000
 tone tone.flac -c:a flac \
     -metadata title="Tone FLAC" -metadata artist="Artist A" \
