@@ -343,11 +343,14 @@ fn moov_edit_duration(moov: &[u8]) -> Option<Duration> {
     };
     let elst = mp4_child(mp4_child(trak, b"edts")?, b"elst")?;
     let (media_time, duration) = one_edit(elst)?;
-    // The media left after the edit's start, in the track's timescale; a
-    // fragmented file gives the media's duration as 0.
-    let rest = media_duration
-        .checked_sub(media_time)
-        .filter(|_| media_duration > 0);
+    // The media left after the edit's start, in the track's timescale, or
+    // `None` when a fragmented file gives the media's duration as 0. An
+    // edit that starts after the end of the media presents nothing.
+    let rest = if media_duration == 0 {
+        None
+    } else {
+        Some(media_duration.checked_sub(media_time)?)
+    };
     // The edit ends at the end of the media, as in `terra-player`.
     let rest = rest.and_then(|rest| samples_to_duration(rest, u64::from(timescale)));
     let edit = duration.and_then(|d| samples_to_duration(d, u64::from(movie_timescale)));
@@ -581,6 +584,18 @@ mod tests {
         let duration = moov_edit_duration(&moov(b"soun", 0, Some(&long)));
         assert_eq!(duration, Some(Duration::from_secs(2)));
         assert_eq!(moov_edit_duration(&moov(b"soun", 0, Some(&open))), None);
+        // An edit that starts after the end of the media presents nothing,
+        // so the file keeps another duration.
+        let beyond = [(10_000, 96_000, RATE_1)];
+        assert_eq!(
+            moov_edit_duration(&moov(b"soun", 48_000, Some(&beyond))),
+            None
+        );
+        let at_end = [(10_000, 48_000, RATE_1)];
+        assert_eq!(
+            moov_edit_duration(&moov(b"soun", 48_000, Some(&at_end))),
+            None
+        );
     }
 
     #[test]
