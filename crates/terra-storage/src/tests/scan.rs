@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::{fs, io};
 
-use lofty::config::WriteOptions;
+use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::mp4::{Atom, AtomData, AtomIdent, Mp4File};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::tag::{Accessor, ItemKey, Tag};
 use tempfile::TempDir;
@@ -43,9 +44,15 @@ pub(crate) struct Setup {
 
 impl Setup {
     pub(crate) async fn new() -> Self {
+        Self::with(FILES).await
+    }
+
+    /// A library whose music folder holds a copy of each of `files`, a
+    /// fixture and where it goes.
+    async fn with(files: &[(&str, &str)]) -> Self {
         let dir = TempDir::new().unwrap();
         let music = TempDir::new().unwrap();
-        for (fixture, rel_path) in FILES {
+        for (fixture, rel_path) in files {
             let to = music.path().join(rel_path);
             fs::create_dir_all(to.parent().unwrap()).unwrap();
             fs::copy(Path::new(FIXTURES).join(fixture), &to).unwrap();
@@ -185,12 +192,9 @@ async fn scanning_the_fixtures_adds_every_file() {
         assert_eq!(track.format.codec, codec, "{title}");
         assert_eq!(track.format.lossless, lossless, "{title}");
         assert_eq!(track.format.channels, 1, "{title}");
-        let off = track.duration.abs_diff(Duration::from_secs(1));
-        assert!(
-            off <= Duration::from_millis(50),
-            "{title}: {:?}",
-            track.duration
-        );
+        // The MP3 and AAC durations leave out the encoder delay and
+        // padding.
+        assert_one_second(track);
     }
     assert_eq!(tracks["Tone FLAC"].track_no, Some(2));
     assert_eq!(tracks["Tone ALAC"].disc_no, Some(1));
@@ -384,6 +388,74 @@ async fn a_deleted_file_is_missing_until_it_comes_back() {
     assert_eq!(setup.missing_since(&track).await, None);
     let source = setup.library.resolve_audio_source(track.id).await.unwrap();
     assert_eq!(source, AudioSource::LocalPath(path));
+}
+
+/// Asserts that `track` lasts 1 s, within 1 ms.
+fn assert_one_second(track: &Track) {
+    let off = track.duration.abs_diff(Duration::from_secs(1));
+    assert!(
+        off <= Duration::from_millis(1),
+        "{}: {:?}",
+        track.title,
+        track.duration
+    );
+}
+
+#[tokio::test]
+async fn an_mp3_duration_leaves_out_the_lame_delay_and_padding() {
+    let setup = Setup::with(&[
+        ("tone-22k.mp3", "tone-22k.mp3"),
+        ("tone-no-xing.mp3", "tone-no-xing.mp3"),
+    ])
+    .await;
+    assert_eq!(setup.scan().await, report(2, 0, 0, 0, 0));
+
+    // At 22.05 kHz the delay and padding are 71 ms of the 41 frames.
+    assert_one_second(&setup.track("Tone MP3 22 kHz").await);
+
+    // Without a Xing/LAME frame there is nothing to subtract: the duration
+    // is Lofty's, which counts whole frames.
+    let track = setup.track("Tone MP3 without Xing").await;
+    let lofty = lofty::read_from_path(setup.path("tone-no-xing.mp3"))
+        .unwrap()
+        .properties()
+        .duration();
+    assert_eq!(track.duration, lofty);
+    assert!(track.duration > Duration::from_millis(1020), "{lofty:?}");
+}
+
+#[tokio::test]
+async fn an_m4a_without_an_edit_list_takes_its_length_from_itunsmpb() {
+    let setup = Setup::with(&[("tone-aac.m4a", "tone-aac.m4a")]).await;
+    let path = setup.path("tone-aac.m4a");
+    // Hide the edit list by renaming its `edts` box to `free`, which keeps
+    // every size and offset.
+    let mut bytes = fs::read(&path).unwrap();
+    let edts = bytes.windows(4).position(|w| w == b"edts").unwrap();
+    bytes[edts..edts + 4].copy_from_slice(b"free");
+    fs::write(&path, bytes).unwrap();
+    set_mtime(&path, 0);
+
+    // Without an edit list or an `iTunSMPB` tag the duration is Lofty's,
+    // priming and padding included.
+    assert_eq!(setup.scan().await, report(1, 0, 0, 0, 0));
+    let track = setup.track("Tone AAC").await;
+    assert!(track.duration > Duration::from_millis(1010), "{track:?}");
+
+    // 1024 samples of priming, 960 of padding and 48 000 of audio.
+    let mut file = fs::File::open(&path).unwrap();
+    let mut m4a = Mp4File::read_from(&mut file, ParseOptions::new()).unwrap();
+    m4a.ilst_mut().unwrap().insert(Atom::new(
+        AtomIdent::Freeform {
+            mean: "com.apple.iTunes".into(),
+            name: "iTunSMPB".into(),
+        },
+        AtomData::UTF8(" 00000000 00000400 000003C0 000000000000BB80".to_owned()),
+    ));
+    m4a.save_to_path(&path, WriteOptions::default()).unwrap();
+    set_mtime(&path, 1);
+    assert_eq!(setup.scan().await, report(0, 1, 0, 0, 0));
+    assert_one_second(&setup.track("Tone AAC").await);
 }
 
 #[tokio::test]
