@@ -1,6 +1,6 @@
 # Player and queue
 
-Status: Proposed, with #7. The responsible engineer approves it by merging that pull request.
+Status: Accepted, with #7.
 
 `crates/terra-player` plays audio on the machine it runs on (brief §4.2, §14 "Play audio where the user is"). The engine is Rodio, as `docs/decisions/0002-playback-engine.md` decides. This document records the behaviour a user sees, where the brief, the record and #7 leave it open, and the two places where the crate departs from the record's sketch.
 
