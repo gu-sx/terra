@@ -3012,6 +3012,7 @@ dependencies = [
 name = "terra-player"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
  "rodio",
  "symphonia",
  "symphonia-adapter-libopus",

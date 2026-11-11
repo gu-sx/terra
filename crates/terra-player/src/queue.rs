@@ -174,6 +174,21 @@ impl<T> Queue<T> {
         true
     }
 
+    /// Puts the items still to come in a random order, once: the items after
+    /// the current one, or with no current item those
+    /// [`next`](Self::next) walks to. Before the first item and past the
+    /// end, that is every item. The cursor and the items before it stay
+    /// where they are, and every item keeps its identifier.
+    pub fn shuffle(&mut self, rng: &mut fastrand::Rng) {
+        let start = match self.cursor {
+            Cursor::At(i) => i + 1,
+            Cursor::Before(i) if i < self.items.len() => i,
+            // Past the end, repeat starts over from the first item.
+            Cursor::Before(_) => 0,
+        };
+        rng.shuffle(&mut self.items[start..]);
+    }
+
     /// Removes every item. Repeat is kept.
     pub fn clear(&mut self) {
         self.items.clear();
