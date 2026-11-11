@@ -166,3 +166,43 @@ fn a_converted_item_ends_at_its_exact_length() {
         );
     }
 }
+
+/// The length, in samples, that `frames` mono frames at `rate` convert to.
+fn converted_length(rate: u32, frames: u32, to: Format) -> usize {
+    let frames = (f64::from(frames) * f64::from(to.rate.get()) / f64::from(rate)).round();
+    frames as usize * usize::from(to.channels.get())
+}
+
+#[test]
+fn a_converted_item_ends_before_a_frame_the_converter_makes_from_its_last_frames() {
+    // Rodio's converter makes output frame 44 100 from input frames 192 000
+    // and 192 001, the last two, before the item shows its end.
+    let mono = Format {
+        channels: NonZero::new(1).unwrap(),
+        rate: NonZero::new(44_100).unwrap(),
+    };
+    let converted = Converted::new(Box::new(sine(192_000, 0, 192_002)), mono);
+    assert_eq!(converted.count(), 44_100);
+}
+
+#[test]
+fn every_item_length_converts_to_its_exact_length() {
+    // The converters repeat every 640 input frames at most, the period of
+    // 192 kHz to 44.1 kHz.
+    for (channels, rate) in [(1, 44_100), (2, 48_000)] {
+        let to = Format {
+            channels: NonZero::new(channels).unwrap(),
+            rate: NonZero::new(rate).unwrap(),
+        };
+        for rate in [8_000, 22_050, 44_100, 48_000, 88_200, 96_000, 192_000] {
+            for frames in 0..=700 {
+                let converted = Converted::new(Box::new(sine(rate, 0, frames)), to);
+                assert_eq!(
+                    converted.count(),
+                    converted_length(rate, frames, to),
+                    "{frames} frames at {rate} Hz to {to:?}"
+                );
+            }
+        }
+    }
+}

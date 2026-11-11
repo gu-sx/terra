@@ -17,6 +17,7 @@
 //! unconverted, so the deck reports a single endless span and Rodio never
 //! converts again.
 
+use std::collections::VecDeque;
 use std::mem;
 use std::num::NonZero;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,10 +92,17 @@ pub(crate) struct Format {
     pub(crate) rate: NonZero<u32>,
 }
 
-/// Passes an item's samples on, counting them, and notes when they end.
+/// Passes an item's samples on, reading a few ahead of them, and counts
+/// the samples read.
 struct Counted {
     source: Box<dyn Source + Send>,
+    /// Samples read but not yet passed on.
+    ahead: VecDeque<f32>,
+    /// How many samples to read ahead.
+    lookahead: usize,
+    /// Samples read.
     samples: u64,
+    /// Whether the source has ended.
     ended: bool,
 }
 
@@ -102,15 +110,16 @@ impl Iterator for Counted {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
-        if self.ended {
-            return None;
+        while !self.ended && self.ahead.len() <= self.lookahead {
+            match self.source.next() {
+                Some(sample) => {
+                    self.samples += 1;
+                    self.ahead.push_back(sample);
+                }
+                None => self.ended = true,
+            }
         }
-        let sample = self.source.next();
-        match sample {
-            Some(_) => self.samples += 1,
-            None => self.ended = true,
-        }
-        sample
+        self.ahead.pop_front()
     }
 }
 
@@ -122,9 +131,14 @@ impl Iterator for Counted {
 /// it downsamples it can end one frame late. Once the item has ended, its
 /// output ends at its exact length in output frames: the last frame is held
 /// for the frames the converter leaves out, and frames past that length are
-/// dropped. The converter reads ahead, so the end shows only while a frame
-/// is being converted: each frame is converted whole before any of it is
-/// played.
+/// dropped.
+///
+/// The length must be known before the converter makes a frame at or past
+/// it. After output frame `k` the converter has read input frames up to
+/// `k × from / to + 1`, and the length is at least `frames × to / from − ½`,
+/// so reading `from / to` frames further ahead shows whether the item has
+/// ended in time. The converter also reads ahead within a frame, so each
+/// frame is converted whole before any of it is played.
 struct Converted {
     converter: ChannelCountConverter<SampleRateConverter<Counted>>,
     channels: NonZero<u16>,
@@ -139,8 +153,12 @@ struct Converted {
 impl Converted {
     fn new(source: Box<dyn Source + Send>, to: Format) -> Self {
         let (channels, rate) = (source.channels(), source.sample_rate());
+        let frames = rate.get().div_ceil(to.rate.get()) as usize;
+        let lookahead = frames * usize::from(channels.get());
         let counted = Counted {
             source,
+            ahead: VecDeque::with_capacity(lookahead + 1),
+            lookahead,
             samples: 0,
             ended: false,
         };
