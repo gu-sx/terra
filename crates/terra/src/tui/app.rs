@@ -296,12 +296,12 @@ pub enum Request {
 
 impl Action {
     /// Whether the action drives the player, so that it acts at once rather
-    /// than wait for a list to load.
+    /// than wait for a list to load. Opening the queue view waits: the keys
+    /// held before it would otherwise replay in the view.
     pub fn is_playback(self) -> bool {
         matches!(
             self,
-            Self::ToggleQueue
-                | Self::TogglePause
+            Self::TogglePause
                 | Self::NextTrack
                 | Self::PreviousTrack
                 | Self::Seek { .. }

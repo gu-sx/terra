@@ -374,6 +374,35 @@ fn playback_keys_act_while_a_list_loads() {
 }
 
 #[test]
+fn the_queue_view_waits_for_the_keys_held_before_it() {
+    let mut harness = Harness::playlists();
+    harness.select("Sunrise");
+    harness.press(KeyCode::Enter);
+    harness.player.commands();
+    let queued = harness.queue();
+    // "Driving" is loading while `j`, `x` and `Q` are typed.
+    harness.type_text("hgjjjj");
+    let requests = harness.press_unanswered(KeyCode::Enter);
+    harness.type_text("jxQ");
+    assert!(harness.app.queue_view.is_none());
+    harness.answer(requests);
+
+    // `j` and `x` removed the playlist's second entry, then `Q` opened the
+    // queue, which is as it was.
+    assert_eq!(harness.names(), ["Midnight Drive", "Last Light"]);
+    assert_eq!(
+        harness.stored()[0],
+        (
+            "Driving".to_owned(),
+            vec!["Midnight Drive".to_owned(), "Last Light".to_owned()]
+        )
+    );
+    assert!(harness.app.queue_view.is_some());
+    assert_eq!(harness.player.commands(), []);
+    assert_eq!(harness.queue(), queued);
+}
+
+#[test]
 fn the_queue_view_removes_and_reorders_items() {
     let mut harness = Harness::sample();
     harness.select("Last Light");
