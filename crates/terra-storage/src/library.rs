@@ -13,6 +13,11 @@ use crate::error::Error;
 /// The name of the database file in a library's directory.
 pub const DATABASE_FILE: &str = "library.db";
 
+/// The name of the file in a library's directory that
+/// [`scan`](LocalLibrary::scan) locks while it runs, so that two scans of
+/// one library never run at once.
+pub const SCAN_LOCK_FILE: &str = "scan.lock";
+
 /// The collation that orders text ignoring case, as the
 /// [`LibraryBackend`](terra_core::LibraryBackend) contract asks: it compares
 /// the Unicode lower-case forms. Every connection registers it; the schema
@@ -33,6 +38,8 @@ pub(crate) static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 #[derive(Debug, Clone)]
 pub struct LocalLibrary {
     pub(crate) pool: SqlitePool,
+    /// The directory the library was created or opened in.
+    pub(crate) dir: PathBuf,
 }
 
 impl LocalLibrary {
@@ -60,7 +67,10 @@ impl LocalLibrary {
         }
         let pool = connect(&path).await?;
         MIGRATOR.run(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            dir: dir.to_owned(),
+        })
     }
 
     /// Applies the migrations the library in `dir` lacks. A library that has
@@ -97,13 +107,15 @@ impl LocalLibrary {
     /// [`Error::SchemaMismatch`] if an applied migration differs from this
     /// version's.
     pub async fn open(dir: impl AsRef<Path>) -> Result<Self, Error> {
-        let path = existing_database(dir.as_ref())?;
+        let dir = dir.as_ref();
+        let path = existing_database(dir)?;
         let mut conn = inspection_options(&path)?.connect().await?;
         let checked = check_schema(&mut conn).await;
         conn.close().await?;
         checked?;
         Ok(Self {
             pool: connect(&path).await?,
+            dir: dir.to_owned(),
         })
     }
 
