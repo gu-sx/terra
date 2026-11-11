@@ -4,6 +4,7 @@
 //! blocking threads.
 
 use std::ffi::OsStr;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use walkdir::{DirEntry, WalkDir};
@@ -38,9 +39,10 @@ pub(crate) struct Seen {
 pub(crate) struct Walk {
     pub(crate) seen: Vec<Seen>,
     pub(crate) errors: Vec<(PathBuf, String)>,
-    /// The roots the walk could not read, or that are not directories. Their
-    /// errors are not in `errors`: the scan reports each root once.
-    pub(crate) unread_roots: Vec<i64>,
+    /// The roots the walk could not read, or that are not directories, with
+    /// the reason. Their errors are not in `errors`: the scan reports each
+    /// root once, with the reason.
+    pub(crate) unread_roots: Vec<(i64, String)>,
     /// The paths below a root that the walk could not read, such as a
     /// directory it could not list: files at or under them may be there
     /// unseen. Each one's error is in `errors`.
@@ -64,7 +66,8 @@ pub(crate) fn walk(roots: &[Root]) -> Walk {
                 // A symbolic link to a directory is walked as a root.
                 Ok(entry) if entry.depth() == 0 => {
                     if !entry.path().is_dir() {
-                        walk.unread_roots.push(root.id);
+                        let err = io::Error::from(io::ErrorKind::NotADirectory);
+                        walk.unread_roots.push((root.id, err.to_string()));
                     }
                 }
                 Ok(entry) if entry.file_type().is_file() && is_audio(entry.path()) => {
@@ -77,7 +80,14 @@ pub(crate) fn walk(roots: &[Root]) -> Walk {
                     }
                 }
                 Ok(_) => {}
-                Err(err) if err.depth() == 0 => walk.unread_roots.push(root.id),
+                Err(err) if err.depth() == 0 => {
+                    // The I/O error alone: the walk's own message names the
+                    // root, which the scan's entry for it names already.
+                    let reason = err
+                        .io_error()
+                        .map_or_else(|| err.to_string(), io::Error::to_string);
+                    walk.unread_roots.push((root.id, reason));
+                }
                 Err(err) => {
                     // Without a path, the directory being listed is unknown,
                     // so the whole root may hold files the walk did not see.

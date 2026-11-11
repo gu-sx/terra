@@ -164,11 +164,11 @@ impl LocalLibrary {
     ///
     /// A root that cannot be read, or holds no audio file while some of its
     /// tracks are not missing, such as an unmounted drive, is reported once
-    /// in [`ScanReport::errors`] and its files are left as they were: not
-    /// marked missing, and not taken for moved by a copy elsewhere. So are
-    /// the files under a folder that cannot be read. A root emptied on
-    /// purpose therefore keeps its tracks; [`remove_root`](Self::remove_root)
-    /// removes them.
+    /// in [`ScanReport::errors`], with the cause if it cannot be read, and
+    /// its files are left as they were: not marked missing, and not taken
+    /// for moved by a copy elsewhere. So are the files under a folder that
+    /// cannot be read. A root emptied on purpose therefore keeps its tracks;
+    /// [`remove_root`](Self::remove_root) removes them.
     ///
     /// Only one scan of a library runs at a time: a scan holds an exclusive
     /// lock on [`SCAN_LOCK_FILE`](crate::SCAN_LOCK_FILE) in the library's
@@ -210,14 +210,16 @@ impl LocalLibrary {
             errors: walk.errors,
             ..ScanReport::default()
         };
-        for (root, files) in left_alone.roots {
-            report.errors.push((
-                root.to_owned(),
-                format!(
-                    "the root could not be read or holds no audio files; \
-                     its {files} files were left as they were"
-                ),
-            ));
+        for (root, files, reason) in left_alone.roots {
+            let mut message = format!(
+                "the root could not be read or holds no audio files; \
+                 its {files} files were left as they were"
+            );
+            if let Some(reason) = reason {
+                message.push_str(": ");
+                message.push_str(&reason);
+            }
+            report.errors.push((root.to_owned(), message));
         }
         let total = walk.seen.len();
         let mut done = 0;
@@ -404,8 +406,8 @@ impl LocalLibrary {
 struct LeftAlone<'a> {
     /// The roots the walk could not read, or found no audio file under
     /// while some of their known files were not missing, with the number of
-    /// known files each has.
-    roots: Vec<(&'a Path, usize)>,
+    /// known files each has and, for a root the walk could not read, why.
+    roots: Vec<(&'a Path, usize, Option<String>)>,
     /// For each known file, in order, whether it is left as it was: it is
     /// in one of those roots, or at or under a path the walk could not read.
     files: Vec<bool>,
@@ -413,10 +415,15 @@ struct LeftAlone<'a> {
 
 fn left_alone<'a>(roots: &'a [Root], known: &[Known], walk: &Walk) -> LeftAlone<'a> {
     let found: HashSet<i64> = walk.seen.iter().map(|seen| seen.root).collect();
+    let unread: HashMap<i64, &String> = walk
+        .unread_roots
+        .iter()
+        .map(|(root, reason)| (*root, reason))
+        .collect();
     let unavailable: Vec<&Root> = roots
         .iter()
         .filter(|root| {
-            walk.unread_roots.contains(&root.id)
+            unread.contains_key(&root.id)
                 || (!found.contains(&root.id)
                     && known
                         .iter()
@@ -441,7 +448,11 @@ fn left_alone<'a>(roots: &'a [Root], known: &[Known], walk: &Walk) -> LeftAlone<
         .into_iter()
         .map(|root| {
             let files = known.iter().filter(|file| file.root_id == root.id).count();
-            (root.path.as_path(), files)
+            (
+                root.path.as_path(),
+                files,
+                unread.get(&root.id).map(|reason| (*reason).clone()),
+            )
         })
         .collect();
     LeftAlone { roots, files }
