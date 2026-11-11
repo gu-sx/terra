@@ -86,6 +86,7 @@ enum Command {
     Remove(QueueItemId),
     Move(QueueItemId, usize),
     ClearQueue,
+    Shuffle,
     SetRepeat(Repeat),
     Pause,
     Resume,
@@ -187,6 +188,12 @@ impl Player {
     /// Empties the queue and stops.
     pub fn clear(&self) -> Result<(), PlayerError> {
         self.send(Command::ClearQueue)
+    }
+
+    /// Puts the items still to come in a random order, once (see
+    /// [`Queue::shuffle`]).
+    pub fn shuffle(&self) -> Result<(), PlayerError> {
+        self.send(Command::Shuffle)
     }
 
     pub fn set_repeat(&self, repeat: Repeat) -> Result<(), PlayerError> {
@@ -294,6 +301,8 @@ struct Core<E> {
     engine: E,
     events: Sender<PlayerEvent>,
     queue: Queue<AudioSource>,
+    /// Shuffles the queue.
+    rng: fastrand::Rng,
     state: State,
     /// The item the engine plays.
     current: Option<QueueItemId>,
@@ -316,6 +325,7 @@ impl<E: Engine> Core<E> {
             engine,
             events,
             queue: Queue::new(),
+            rng: fastrand::Rng::new(),
             state: State::Stopped,
             current: None,
             loading: None,
@@ -377,6 +387,10 @@ impl<E: Engine> Core<E> {
             Command::ClearQueue => {
                 self.queue.clear();
                 self.stop();
+            }
+            Command::Shuffle => {
+                self.queue.shuffle(&mut self.rng);
+                self.sync_next();
             }
             Command::SetRepeat(repeat) => {
                 self.queue.set_repeat(repeat);

@@ -303,6 +303,26 @@ fn moving_an_item_after_the_current_one_hands_it_over() {
 }
 
 #[test]
+fn shuffling_while_an_item_plays_hands_over_the_new_next_item() {
+    let mut h = Harness::new();
+    h.core.rng = fastrand::Rng::with_seed(7);
+    let a = h.play("a");
+    let b = h.append("b");
+    for name in ["c", "d", "e", "f", "g", "h"] {
+        h.append(name);
+    }
+    h.start(a);
+    h.calls();
+    h.core.command(Command::Shuffle);
+    let next = h.core.queue.peek_next();
+    // The seed makes another item come next.
+    assert_ne!(next, Some(b));
+    assert_eq!(h.calls(), [Call::SetNext(next)]);
+    assert_eq!(h.core.queue.current_id(), Some(a));
+    assert_eq!(h.events(), [started(a)]);
+}
+
+#[test]
 fn events_of_an_item_replaced_before_it_started_are_dropped() {
     let mut h = Harness::new();
     let a = h.play("a");

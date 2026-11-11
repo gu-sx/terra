@@ -1,5 +1,6 @@
 //! Every operation of the pure queue.
 
+use fastrand::Rng;
 use terra_player::{Queue, QueueItemId, Repeat};
 
 /// A queue of `names`, with no current item.
@@ -221,4 +222,97 @@ fn select_makes_an_item_current() {
     assert_eq!(queue.next(), Some(ids[2]));
     queue.remove(ids[0]);
     assert!(!queue.select(ids[0]));
+}
+
+/// The items as (id, name) pairs, in order.
+fn entries(queue: &Queue<&'static str>) -> Vec<(QueueItemId, &'static str)> {
+    queue.iter().map(|(id, name)| (id, *name)).collect()
+}
+
+/// `entries` sorted, to compare as a set.
+fn sorted(mut entries: Vec<(QueueItemId, &'static str)>) -> Vec<(QueueItemId, &'static str)> {
+    entries.sort();
+    entries
+}
+
+const NAMES: [&str; 8] = ["a", "b", "c", "d", "e", "f", "g", "h"];
+
+#[test]
+fn shuffle_keeps_the_current_item_and_those_before_it() {
+    let (mut queue, ids) = queue(&NAMES);
+    queue.select(ids[2]);
+    let before = entries(&queue);
+    queue.shuffle(&mut Rng::with_seed(7));
+    let after = entries(&queue);
+    assert_eq!(after[..3], before[..3]);
+    assert_eq!(current(&queue), Some("c"));
+    assert_ne!(after[3..], before[3..]);
+    assert_eq!(sorted(after[3..].to_vec()), sorted(before[3..].to_vec()));
+    assert_eq!(queue.peek_next(), Some(after[3].0));
+}
+
+#[test]
+fn shuffle_with_no_current_item_permutes_every_item() {
+    let (mut queue, _) = queue(&NAMES);
+    let before = entries(&queue);
+    queue.shuffle(&mut Rng::with_seed(7));
+    let after = entries(&queue);
+    assert_ne!(after, before);
+    assert_eq!(sorted(after.clone()), sorted(before));
+    assert_eq!(queue.current(), None);
+    assert_eq!(queue.next(), Some(after[0].0));
+}
+
+#[test]
+fn shuffle_past_the_end_permutes_every_item_and_stays_there() {
+    let (mut queue, ids) = queue(&NAMES);
+    queue.select(ids[7]);
+    queue.next();
+    let before = entries(&queue);
+    queue.shuffle(&mut Rng::with_seed(7));
+    let after = entries(&queue);
+    assert_ne!(after, before);
+    assert_eq!(sorted(after.clone()), sorted(before));
+    assert_eq!(queue.next(), None);
+    queue.set_repeat(Repeat::All);
+    assert_eq!(queue.next(), Some(after[0].0));
+}
+
+#[test]
+fn shuffle_after_removing_the_current_item_keeps_those_before_it() {
+    let (mut queue, ids) = queue(&NAMES);
+    queue.select(ids[2]);
+    queue.remove(ids[2]);
+    let before = entries(&queue);
+    queue.shuffle(&mut Rng::with_seed(7));
+    let after = entries(&queue);
+    assert_eq!(after[..2], before[..2]);
+    assert_ne!(after[2..], before[2..]);
+    assert_eq!(sorted(after[2..].to_vec()), sorted(before[2..].to_vec()));
+    assert_eq!(queue.next(), Some(after[2].0));
+}
+
+#[test]
+fn shuffle_leaves_an_empty_queue_and_a_single_item_unchanged() {
+    let (mut empty, _) = queue(&[]);
+    empty.shuffle(&mut Rng::with_seed(7));
+    assert!(empty.is_empty());
+    assert_eq!(empty.next(), None);
+
+    let (mut single, ids) = queue(&["a"]);
+    single.shuffle(&mut Rng::with_seed(7));
+    assert_eq!(entries(&single), [(ids[0], "a")]);
+    assert_eq!(single.next(), Some(ids[0]));
+    single.shuffle(&mut Rng::with_seed(7));
+    assert_eq!(entries(&single), [(ids[0], "a")]);
+    assert_eq!(current(&single), Some("a"));
+}
+
+#[test]
+fn shuffle_with_the_same_seed_gives_the_same_order() {
+    let (mut first, _) = queue(&NAMES);
+    let (mut second, _) = queue(&NAMES);
+    first.shuffle(&mut Rng::with_seed(7));
+    second.shuffle(&mut Rng::with_seed(7));
+    assert_eq!(order(&first), order(&second));
 }

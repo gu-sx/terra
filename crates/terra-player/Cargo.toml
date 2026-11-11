@@ -12,7 +12,9 @@ description = "Local playback: the queue, the player handle and the Rodio engine
 # Symphonia's `isomp4`, `aac` and `alac` are the ones Rodio's `mp4` and
 # `symphonia-alac` turn on; terra names them because it drives M4A itself, to
 # apply the edit list (#23).
+# fastrand shuffles the queue.
 [dependencies]
+fastrand = "2.5.0"
 rodio = { version = "=0.23.0", default-features = false, features = ["playback", "mp3", "flac", "mp4", "symphonia-alac"] }
 symphonia = { version = "=0.5.5", default-features = false, features = ["ogg", "isomp4", "aac", "alac"] }
 symphonia-adapter-libopus = { version = "0.2.9", default-features = false }
