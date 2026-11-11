@@ -10,12 +10,14 @@
 //! stays gapless.
 //!
 //! The deck plays in one fixed format, the output's, and converts each item
-//! to it with one converter for the whole item. Rodio's mixer starts a new
+//! to it with one converter for the whole item, ending it at its exact
+//! length in the output's frames. Rodio's mixer starts a new
 //! sample-rate converter for every span of its input and loses audio at each
 //! boundary; a source in the mixer's own format passes through it
 //! unconverted, so the deck reports a single endless span and Rodio never
 //! converts again.
 
+use std::collections::VecDeque;
 use std::mem;
 use std::num::NonZero;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,13 +92,129 @@ pub(crate) struct Format {
     pub(crate) rate: NonZero<u32>,
 }
 
-type Converted = ChannelCountConverter<SampleRateConverter<Box<dyn Source + Send>>>;
+/// Passes an item's samples on, reading a few ahead of them, and counts
+/// the samples read.
+struct Counted {
+    source: Box<dyn Source + Send>,
+    /// Samples read but not yet passed on.
+    ahead: VecDeque<f32>,
+    /// How many samples to read ahead.
+    lookahead: usize,
+    /// Samples read.
+    samples: u64,
+    /// Whether the source has ended.
+    ended: bool,
+}
 
-/// Converts `source` to `to`, with one converter for all of it.
-fn convert(source: Box<dyn Source + Send>, to: Format) -> Converted {
-    let (channels, rate) = (source.channels(), source.sample_rate());
-    let resampled = SampleRateConverter::new(source, rate, to.rate, channels);
-    ChannelCountConverter::new(resampled, channels, to.channels)
+impl Iterator for Counted {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        while !self.ended && self.ahead.len() <= self.lookahead {
+            match self.source.next() {
+                Some(sample) => {
+                    self.samples += 1;
+                    self.ahead.push_back(sample);
+                }
+                None => self.ended = true,
+            }
+        }
+        self.ahead.pop_front()
+    }
+}
+
+/// An item converted to the output's format, with one converter for all of
+/// it.
+///
+/// Rodio's sample-rate converter cannot interpolate past an item's last
+/// frame, so when it upsamples it ends a few output frames early, and when
+/// it downsamples it can end one frame late. Once the item has ended, its
+/// output ends at its exact length in output frames: the last frame is held
+/// for the frames the converter leaves out, and frames past that length are
+/// dropped.
+///
+/// The length must be known before the converter makes a frame at or past
+/// it. After output frame `k` the converter has read input frames up to
+/// `k × from / to + 1`, and the length is at least `frames × to / from − ½`,
+/// so reading `from / to` frames further ahead shows whether the item has
+/// ended in time. The converter also reads ahead within a frame, so each
+/// frame is converted whole before any of it is played.
+struct Converted {
+    converter: ChannelCountConverter<SampleRateConverter<Counted>>,
+    channels: NonZero<u16>,
+    rate: NonZero<u32>,
+    to: Format,
+    /// Output samples played.
+    samples: u64,
+    /// The output frame being played, or the last one.
+    frame: Vec<f32>,
+}
+
+impl Converted {
+    fn new(source: Box<dyn Source + Send>, to: Format) -> Self {
+        let (channels, rate) = (source.channels(), source.sample_rate());
+        let frames = rate.get().div_ceil(to.rate.get()) as usize;
+        let lookahead = frames * usize::from(channels.get());
+        let counted = Counted {
+            source,
+            ahead: VecDeque::with_capacity(lookahead + 1),
+            lookahead,
+            samples: 0,
+            ended: false,
+        };
+        let resampled = SampleRateConverter::new(counted, rate, to.rate, channels);
+        Self {
+            converter: ChannelCountConverter::new(resampled, channels, to.channels),
+            channels,
+            rate,
+            to,
+            samples: 0,
+            frame: vec![0.0; usize::from(to.channels.get())],
+        }
+    }
+
+    fn into_inner(self) -> Box<dyn Source + Send> {
+        self.converter.into_inner().into_inner().source
+    }
+
+    /// The item's length in output samples, once it has ended.
+    fn length(&mut self) -> Option<u64> {
+        let counted = self.converter.inner_mut().inner_mut();
+        if !counted.ended {
+            return None;
+        }
+        let frames = counted.samples.div_ceil(u64::from(self.channels.get()));
+        let (from, to) = (u64::from(self.rate.get()), u64::from(self.to.rate.get()));
+        let frames = (frames * to + from / 2) / from;
+        Some(frames * u64::from(self.to.channels.get()))
+    }
+
+    /// Converts the next frame into `frame`, keeping the last frame's
+    /// samples where the converter has none. Returns whether the frame is
+    /// within the item's length.
+    fn convert_frame(&mut self) -> bool {
+        for sample in &mut self.frame {
+            match self.converter.next() {
+                Some(converted) => *sample = converted,
+                None => break,
+            }
+        }
+        // The converter ends only after its source has: the length is known.
+        self.length().is_none_or(|length| self.samples < length)
+    }
+}
+
+impl Iterator for Converted {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        let channel = (self.samples % u64::from(self.to.channels.get())) as usize;
+        if channel == 0 && !self.convert_frame() {
+            return None;
+        }
+        self.samples += 1;
+        Some(self.frame[channel])
+    }
 }
 
 /// The current item and how far it has played.
@@ -124,7 +242,7 @@ impl Playing {
             item: track.item,
             rate: track.source.sample_rate(),
             total: track.source.total_duration(),
-            output: Some(convert(track.source, format)),
+            output: Some(Converted::new(track.source, format)),
             base: Duration::ZERO,
             samples: 0,
             started: false,
@@ -214,10 +332,9 @@ impl Deck {
             .output
             .take()
             .expect("an item has its output outside a seek")
-            .into_inner()
             .into_inner();
         let result = source.try_seek(position);
-        playing.output = Some(convert(source, format));
+        playing.output = Some(Converted::new(source, format));
         match result {
             Ok(()) => {
                 let frames = duration_to_frames(position, playing.rate.get());

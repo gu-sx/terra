@@ -17,7 +17,7 @@ use terra_core::{
     AlbumFilter, AlbumKind, AudioSource, LibraryBackend, LibraryError, Page, Track, TrackFilter,
 };
 
-use crate::{Error, LocalLibrary, MissingFile, ScanProgress, ScanReport};
+use crate::{Error, LocalLibrary, MissingFile, SCAN_LOCK_FILE, ScanProgress, ScanReport};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
@@ -37,7 +37,7 @@ const MTIME: Duration = Duration::from_secs(1_700_000_000);
 /// A library in one temporary folder and a music folder, its only root, in
 /// another, holding a copy of every fixture.
 pub(crate) struct Setup {
-    _dir: TempDir,
+    dir: TempDir,
     music: TempDir,
     pub(crate) library: LocalLibrary,
 }
@@ -63,10 +63,15 @@ impl Setup {
             .unwrap();
         library.add_root(music.path()).await.unwrap();
         Self {
-            _dir: dir,
+            dir,
             music,
             library,
         }
+    }
+
+    /// The library's scan lock file.
+    fn lock_file(&self) -> PathBuf {
+        self.dir.path().join("library").join(SCAN_LOCK_FILE)
     }
 
     pub(crate) fn path(&self, rel_path: &str) -> PathBuf {
@@ -459,7 +464,7 @@ async fn a_missing_file_found_elsewhere_is_a_move() {
     setup.scan().await;
     let track = setup.track("Tone AAC").await;
 
-    let parked = setup._dir.path().join("parked.m4a");
+    let parked = setup.dir.path().join("parked.m4a");
     fs::rename(setup.path("Album B/tone-aac.m4a"), &parked).unwrap();
     assert_eq!(setup.scan().await, report(0, 0, 0, 1, 4));
     fs::rename(&parked, setup.path("back.m4a")).unwrap();
@@ -500,7 +505,7 @@ async fn a_root_is_left_alone(unmount: impl FnOnce(&Path, &Path)) {
     let original = &before["Tone FLAC"];
     let root = fs::canonicalize(setup.music.path()).unwrap();
 
-    unmount(&root, &setup._dir.path().join("parked"));
+    unmount(&root, &setup.dir.path().join("parked"));
     let backup = TempDir::new().unwrap();
     let copy = backup.path().join("tone.flac");
     fs::copy(Path::new(FIXTURES).join("tone.flac"), &copy).unwrap();
@@ -685,4 +690,45 @@ async fn roots_do_not_overlap_and_removing_one_removes_its_tracks() {
         setup.library.search("tone", 10).await.unwrap(),
         Default::default()
     );
+}
+
+/// Opens the scan lock file and tries to lock it, as another scan would.
+fn try_lock(path: &Path) -> Result<fs::File, fs::TryLockError> {
+    let file = fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .unwrap();
+    file.try_lock().map(|()| file)
+}
+
+#[tokio::test]
+async fn a_scan_is_refused_while_another_holds_the_lock() {
+    let setup = Setup::new().await;
+    // Standing in for a scan in another process.
+    let other = try_lock(&setup.lock_file()).unwrap();
+
+    let result = setup.library.scan(|_| {}).await;
+    assert!(matches!(result, Err(Error::ScanInProgress)), "{result:?}");
+    assert!(setup.tracks().await.is_empty());
+
+    // Once the other scan has finished, the files are added.
+    drop(other);
+    assert_eq!(setup.scan().await, report(FILES.len(), 0, 0, 0, 0));
+}
+
+#[tokio::test]
+async fn a_scan_releases_its_lock() {
+    let setup = Setup::new().await;
+    setup.scan().await;
+    drop(try_lock(&setup.lock_file()).unwrap());
+
+    // A scan that fails, once it has the lock, releases it too.
+    fs::remove_file(setup.lock_file()).unwrap();
+    setup.library.pool.close().await;
+    let result = setup.library.scan(|_| {}).await;
+    assert!(matches!(result, Err(Error::Database(_))), "{result:?}");
+    assert!(setup.lock_file().exists());
+    drop(try_lock(&setup.lock_file()).unwrap());
 }

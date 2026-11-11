@@ -24,5 +24,5 @@ mod write;
 mod tests;
 
 pub use error::{Error, MissingFile};
-pub use library::{DATABASE_FILE, LocalLibrary};
+pub use library::{DATABASE_FILE, LocalLibrary, SCAN_LOCK_FILE};
 pub use scan::{ScanProgress, ScanReport};

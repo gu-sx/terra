@@ -9,6 +9,7 @@ mod tests;
 mod walk;
 
 use std::collections::{HashMap, HashSet};
+use std::fs::{File, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -17,7 +18,7 @@ use sqlx::SqliteConnection;
 use terra_core::{AlbumKind, TrackId};
 
 use crate::error::Error;
-use crate::library::LocalLibrary;
+use crate::library::{LocalLibrary, SCAN_LOCK_FILE};
 use crate::time::from_nanos;
 use crate::write::{
     NewAlbum, NewFile, NewTrack, RootId, clear_missing, delete_root, ensure_album, ensure_artist,
@@ -169,10 +170,20 @@ impl LocalLibrary {
     /// purpose therefore keeps its tracks; [`remove_root`](Self::remove_root)
     /// removes them.
     ///
+    /// Only one scan of a library runs at a time: a scan holds an exclusive
+    /// lock on [`SCAN_LOCK_FILE`](crate::SCAN_LOCK_FILE) in the library's
+    /// directory, which it creates if missing, until it returns. The system
+    /// releases the lock when a process ends, so a crash leaves none behind.
+    ///
     /// # Errors
     ///
-    /// [`Error::Database`] if the database fails, which ends the scan.
+    /// [`Error::ScanInProgress`] at once, before reading anything, if another
+    /// scan of the library holds the lock, [`Error::Io`] if the lock file
+    /// cannot be opened or locked, and [`Error::Database`] if the database
+    /// fails, which ends the scan.
     pub async fn scan(&self, progress: impl FnMut(ScanProgress)) -> Result<ScanReport, Error> {
+        // Held until the scan returns, on every path; dropping it unlocks.
+        let _lock = lock(&self.dir)?;
         let mut conn = self.pool.acquire().await?;
         let roots = roots(&mut conn).await?;
         let known = known(&mut conn).await?;
@@ -434,6 +445,22 @@ fn left_alone<'a>(roots: &'a [Root], known: &[Known], walk: &Walk) -> LeftAlone<
         })
         .collect();
     LeftAlone { roots, files }
+}
+
+/// Takes the scan lock of the library in `dir`: an exclusive lock on its
+/// [`SCAN_LOCK_FILE`], created if missing. Closing the returned file releases
+/// it.
+fn lock(dir: &Path) -> Result<File, Error> {
+    let file = File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(SCAN_LOCK_FILE))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(Error::ScanInProgress),
+        Err(TryLockError::Error(err)) => Err(err.into()),
+    }
 }
 
 async fn roots(conn: &mut SqliteConnection) -> Result<Vec<Root>, Error> {
