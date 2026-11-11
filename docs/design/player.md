@@ -41,6 +41,8 @@ Each command returns once the player has applied it; the engine follows within a
 
 `next` and `previous` while paused load the item and stay paused; while stopped they only move the cursor.
 
+`status()` returns the play state (stopped, playing or paused), the queue's items in order and its current item, as they are once every command sent before it has been applied. A user interface reads it after its commands and the events, instead of keeping a copy of the queue that the player moves on its own, as when an item fails to open.
+
 Events arrive on a channel, in the order things happen:
 
 - `TrackStarted { item }`: the item's first sample has gone to the output.
