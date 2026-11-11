@@ -14,15 +14,22 @@
 //!   an edit;
 //! - [`render`] draws the state.
 //!
+//! The [`App`] commands the player it holds directly, through [`Playback`],
+//! and [`player_event`] applies what the player reports, returning the plays
+//! to record. The player's queue and state are read from the player, never
+//! kept apart from it (see [`playback`]).
+//!
 //! Only the rows of the main list that fit on the terminal are drawn.
 //!
 //! [`run`] drives that loop on the caller's Tokio runtime, which also runs
-//! the backend, over crossterm's event stream, in the terminal's alternate
-//! screen, and restores the terminal on exit and on panic.
+//! the backend, over crossterm's event stream and the player's events, in
+//! the terminal's alternate screen, and restores the terminal on exit and on
+//! panic.
 
 mod app;
 mod fetch;
 mod keymap;
+mod playback;
 mod playlist;
 mod render;
 
@@ -30,6 +37,8 @@ mod render;
 mod tests;
 
 use std::io;
+use std::sync::mpsc;
+use std::thread;
 
 use crossterm::event::EventStream;
 use futures_util::StreamExt;
@@ -37,22 +46,52 @@ use futures_util::stream::FuturesUnordered;
 use ratatui::DefaultTerminal;
 use terra_core::LibraryBackend;
 use terra_core::testing::MemoryLibrary;
+use terra_player::PlayerEvent;
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 pub use app::{Action, App, handle_event, receive, update};
 pub use fetch::fetch;
+pub use playback::{NoPlayer, Playback, player_event};
 pub use render::render;
 
 /// Runs the TUI against the synthetic sample library until the user quits.
-pub fn run_demo(runtime: &Runtime) -> io::Result<()> {
+pub fn run_demo(
+    runtime: &Runtime,
+    app: App,
+    events: mpsc::Receiver<PlayerEvent>,
+) -> io::Result<()> {
     let library = MemoryLibrary::sample();
-    run(runtime, &library, App::new("demo library"))
+    run(runtime, &library, app, events)
 }
 
-/// Runs the TUI against `backend` on `runtime` until the user quits.
-pub fn run<B: LibraryBackend>(runtime: &Runtime, backend: &B, app: App) -> io::Result<()> {
+/// Runs the TUI against `backend` on `runtime` until the user quits, with
+/// the events of the player `app` holds.
+pub fn run<B: LibraryBackend>(
+    runtime: &Runtime,
+    backend: &B,
+    app: App,
+    events: mpsc::Receiver<PlayerEvent>,
+) -> io::Result<()> {
+    let events = forward(events)?;
     let mut terminal = TerminalGuard::enter()?;
-    runtime.block_on(event_loop(&mut terminal.terminal, backend, app))
+    runtime.block_on(event_loop(&mut terminal.terminal, backend, app, events))
+}
+
+/// Hands the player's events to the event loop from a thread of their own,
+/// which ends when the player or the loop has.
+fn forward(events: mpsc::Receiver<PlayerEvent>) -> io::Result<UnboundedReceiver<PlayerEvent>> {
+    let (sender, receiver) = unbounded_channel();
+    thread::Builder::new()
+        .name("terra-player-events".to_owned())
+        .spawn(move || {
+            for event in events {
+                if sender.send(event).is_err() {
+                    break;
+                }
+            }
+        })?;
+    Ok(receiver)
 }
 
 /// The terminal in raw mode and the alternate screen, restored on drop.
@@ -83,6 +122,7 @@ async fn event_loop<B: LibraryBackend>(
     terminal: &mut DefaultTerminal,
     backend: &B,
     mut app: App,
+    mut player_events: UnboundedReceiver<PlayerEvent>,
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let mut requests = update(
@@ -111,6 +151,9 @@ async fn event_loop<B: LibraryBackend>(
             Some(response) = pending.next(), if !pending.is_empty() => {
                 requests = receive(&mut app, response);
             }
+            Some(event) = player_events.recv() => {
+                requests = player_event(&mut app, event);
+            }
             event = events.next() => match event {
                 Some(Ok(event)) => requests = handle_event(&mut app, &event),
                 Some(Err(error)) => return Err(error),
@@ -120,14 +163,12 @@ async fn event_loop<B: LibraryBackend>(
     }
 }
 
-/// What the TUI returns once the user has quit: the error of an edit that
-/// failed while it waited for the edits, so that it is reported after the
-/// terminal is restored.
+/// What the TUI returns once the user has quit: the error of an edit or a
+/// play that failed while it waited for them, so that it is reported after
+/// the terminal is restored.
 fn exit(app: &App) -> io::Result<()> {
     match &app.quit_error {
-        Some(error) => Err(io::Error::other(format!(
-            "playlist changes not saved: {error}"
-        ))),
+        Some(error) => Err(io::Error::other(error.clone())),
         None => Ok(()),
     }
 }

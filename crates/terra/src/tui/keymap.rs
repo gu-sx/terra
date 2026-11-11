@@ -76,6 +76,11 @@ impl Key {
 pub enum Context {
     /// Moving through the sidebar and the main list.
     Browse,
+    /// Controlling the player: these bindings apply in [`Browse`](Self::Browse)
+    /// and [`Queue`](Self::Queue) too, where those have none for the key.
+    Playback,
+    /// The queue view is open.
+    Queue,
     /// Typing a search query. Characters without a binding go into the
     /// query.
     Search,
@@ -90,8 +95,10 @@ pub enum Context {
 
 impl Context {
     /// The contexts in the order the help overlay shows them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Browse,
+        Self::Playback,
+        Self::Queue,
         Self::Search,
         Self::Prompt,
         Self::Confirm,
@@ -101,6 +108,8 @@ impl Context {
     pub fn title(self) -> &'static str {
         match self {
             Self::Browse => "BROWSE",
+            Self::Playback => "PLAYBACK",
+            Self::Queue => "QUEUE",
             Self::Search => "SEARCH",
             Self::Prompt => "PROMPT",
             Self::Confirm => "CONFIRM",
@@ -117,6 +126,8 @@ impl Context {
                 Modal::Name { .. } | Modal::Picker(_) => Self::Prompt,
                 Modal::Delete(_) => Self::Confirm,
             }
+        } else if app.queue_view.is_some() {
+            Self::Queue
         } else if app.editing_search().is_some() {
             Self::Search
         } else {
@@ -232,7 +243,7 @@ pub const KEYMAP: &[Binding] = &[
         Context::Browse,
         &[Key::plain(KeyCode::Enter)],
         Action::Open,
-        "Open",
+        "Open / play",
         Some("open"),
     ),
     bind(
@@ -255,6 +266,20 @@ pub const KEYMAP: &[Binding] = &[
         Action::AddToPlaylist,
         "Add to a playlist",
         Some("add"),
+    ),
+    bind(
+        Context::Browse,
+        &[Key::char('e')],
+        Action::QueueTrack,
+        "Add to the queue",
+        None,
+    ),
+    bind(
+        Context::Browse,
+        &[Key::char('E')],
+        Action::PlayNext,
+        "Play next",
+        None,
     ),
     bind(
         Context::Browse,
@@ -311,6 +336,151 @@ pub const KEYMAP: &[Binding] = &[
         Action::Quit,
         "Quit",
         Some("quit"),
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char(' ')],
+        Action::TogglePause,
+        "Pause / resume",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char('>')],
+        Action::NextTrack,
+        "Next track",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char('<')],
+        Action::PreviousTrack,
+        "Previous track",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char(']')],
+        Action::Seek {
+            forward: true,
+            seconds: 5,
+        },
+        "Forward 5 s",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char('[')],
+        Action::Seek {
+            forward: false,
+            seconds: 5,
+        },
+        "Back 5 s",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char('}')],
+        Action::Seek {
+            forward: true,
+            seconds: 30,
+        },
+        "Forward 30 s",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char('{')],
+        Action::Seek {
+            forward: false,
+            seconds: 30,
+        },
+        "Back 30 s",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char('+')],
+        Action::VolumeUp,
+        "Volume up",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char('-')],
+        Action::VolumeDown,
+        "Volume down",
+        None,
+    ),
+    bind(
+        Context::Playback,
+        &[Key::char('Q')],
+        Action::ToggleQueue,
+        "Show / hide the queue",
+        None,
+    ),
+    bind(
+        Context::Queue,
+        &[Key::char('j'), Key::plain(KeyCode::Down)],
+        Action::MoveDown,
+        "Move down",
+        None,
+    ),
+    bind(
+        Context::Queue,
+        &[Key::char('k'), Key::plain(KeyCode::Up)],
+        Action::MoveUp,
+        "Move up",
+        None,
+    ),
+    bind(
+        Context::Queue,
+        &[Key::char('g'), Key::plain(KeyCode::Home)],
+        Action::Top,
+        "Go to the top",
+        None,
+    ),
+    bind(
+        Context::Queue,
+        &[Key::char('G'), Key::plain(KeyCode::End)],
+        Action::Bottom,
+        "Go to the bottom",
+        None,
+    ),
+    bind(
+        Context::Queue,
+        &[Key::char('x')],
+        Action::RemoveEntry,
+        "Remove from the queue",
+        Some("remove"),
+    ),
+    bind(
+        Context::Queue,
+        &[Key::char('J')],
+        Action::MoveEntryDown,
+        "Move the item down",
+        Some("down"),
+    ),
+    bind(
+        Context::Queue,
+        &[Key::char('K')],
+        Action::MoveEntryUp,
+        "Move the item up",
+        Some("up"),
+    ),
+    bind(
+        Context::Queue,
+        &[Key::plain(KeyCode::Esc)],
+        Action::ToggleQueue,
+        "Close the queue",
+        Some("close"),
+    ),
+    bind(
+        Context::Queue,
+        &[Key::ctrl('c')],
+        Action::Quit,
+        "Quit",
+        None,
     ),
     bind(
         Context::Search,
@@ -424,14 +594,34 @@ pub const KEYMAP: &[Binding] = &[
         "Close help",
         Some("close"),
     ),
+    bind(
+        Context::Help,
+        &[Key::char('j'), Key::plain(KeyCode::Down)],
+        Action::MoveDown,
+        "Scroll down",
+        None,
+    ),
+    bind(
+        Context::Help,
+        &[Key::char('k'), Key::plain(KeyCode::Up)],
+        Action::MoveUp,
+        "Scroll up",
+        None,
+    ),
 ];
 
 /// The action a key performs in `context`.
 pub fn action_for_key(context: Context, key: Key) -> Option<Action> {
-    let bound = KEYMAP
-        .iter()
-        .find(|binding| binding.context == context && binding.keys.contains(&key))
-        .map(|binding| binding.action);
+    let find = |context: Context| {
+        KEYMAP
+            .iter()
+            .find(|binding| binding.context == context && binding.keys.contains(&key))
+            .map(|binding| binding.action)
+    };
+    let bound = find(context).or_else(|| match context {
+        Context::Browse | Context::Queue => find(Context::Playback),
+        _ => None,
+    });
     match (bound, key.code, context) {
         (Some(action), _, _) => Some(action),
         (None, KeyCode::Char(c), Context::Search) if key.modifiers.is_empty() => {
