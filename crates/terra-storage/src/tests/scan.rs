@@ -3,9 +3,9 @@
 
 use std::collections::HashMap;
 use std::error::Error as _;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use std::{fs, io};
 
 use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFileExt};
@@ -16,7 +16,7 @@ use terra_core::{
     AlbumFilter, AlbumKind, AudioSource, LibraryBackend, LibraryError, Page, Track, TrackFilter,
 };
 
-use crate::{Error, LocalLibrary, MissingFile, ScanProgress, ScanReport};
+use crate::{Error, LocalLibrary, MissingFile, SCAN_LOCK_FILE, ScanProgress, ScanReport};
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
@@ -35,14 +35,14 @@ const MTIME: Duration = Duration::from_secs(1_700_000_000);
 
 /// A library in one temporary folder and a music folder, its only root, in
 /// another, holding a copy of every fixture.
-struct Setup {
-    _dir: TempDir,
+pub(crate) struct Setup {
+    dir: TempDir,
     music: TempDir,
-    library: LocalLibrary,
+    pub(crate) library: LocalLibrary,
 }
 
 impl Setup {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let dir = TempDir::new().unwrap();
         let music = TempDir::new().unwrap();
         for (fixture, rel_path) in FILES {
@@ -56,17 +56,22 @@ impl Setup {
             .unwrap();
         library.add_root(music.path()).await.unwrap();
         Self {
-            _dir: dir,
+            dir,
             music,
             library,
         }
     }
 
-    fn path(&self, rel_path: &str) -> PathBuf {
+    /// The library's scan lock file.
+    fn lock_file(&self) -> PathBuf {
+        self.dir.path().join("library").join(SCAN_LOCK_FILE)
+    }
+
+    pub(crate) fn path(&self, rel_path: &str) -> PathBuf {
         self.music.path().join(rel_path)
     }
 
-    async fn scan(&self) -> ScanReport {
+    pub(crate) async fn scan(&self) -> ScanReport {
         self.library.scan(|_| {}).await.unwrap()
     }
 
@@ -82,14 +87,14 @@ impl Setup {
             .collect()
     }
 
-    async fn track(&self, title: &str) -> Track {
+    pub(crate) async fn track(&self, title: &str) -> Track {
         let mut tracks = self.tracks().await;
         tracks
             .remove(title)
             .unwrap_or_else(|| panic!("no track {title:?} in {:?}", tracks.keys()))
     }
 
-    async fn missing_since(&self, track: &Track) -> Option<i64> {
+    pub(crate) async fn missing_since(&self, track: &Track) -> Option<i64> {
         sqlx::query_scalar("SELECT missing_since FROM media_file WHERE track_id = ?1")
             .bind(track.id.get())
             .fetch_one(&self.library.pool)
@@ -121,7 +126,7 @@ fn retag(path: &Path, step: u64, change: impl FnOnce(&mut Tag)) {
     set_mtime(path, step);
 }
 
-fn report(
+pub(crate) fn report(
     added: usize,
     updated: usize,
     moved: usize,
@@ -387,7 +392,7 @@ async fn a_missing_file_found_elsewhere_is_a_move() {
     setup.scan().await;
     let track = setup.track("Tone AAC").await;
 
-    let parked = setup._dir.path().join("parked.m4a");
+    let parked = setup.dir.path().join("parked.m4a");
     fs::rename(setup.path("Album B/tone-aac.m4a"), &parked).unwrap();
     assert_eq!(setup.scan().await, report(0, 0, 0, 1, 4));
     fs::rename(&parked, setup.path("back.m4a")).unwrap();
@@ -396,6 +401,95 @@ async fn a_missing_file_found_elsewhere_is_a_move() {
     assert_eq!(setup.missing_since(&track).await, None);
     let source = setup.library.resolve_audio_source(track.id).await.unwrap();
     assert_eq!(source, AudioSource::LocalPath(setup.path("back.m4a")));
+}
+
+#[tokio::test]
+async fn an_empty_root_with_tracks_is_left_alone() {
+    // The folder stays, as the mount point of an unmounted drive does.
+    a_root_is_left_alone(|root, parked| {
+        fs::create_dir(parked).unwrap();
+        for entry in fs::read_dir(root).unwrap() {
+            let entry = entry.unwrap();
+            fs::rename(entry.path(), parked.join(entry.file_name())).unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_unreadable_root_is_left_alone() {
+    // The folder is gone, and the entry says so in the system's words.
+    a_root_is_left_alone_because(|root, parked| {
+        fs::rename(root, parked).unwrap();
+        let err = fs::metadata(root).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        Some(err.to_string())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_root_that_is_not_a_directory_is_left_alone() {
+    a_root_is_left_alone_because(|root, parked| {
+        fs::rename(root, parked).unwrap();
+        fs::write(root, b"not a folder").unwrap();
+        Some(io::Error::from(io::ErrorKind::NotADirectory).to_string())
+    })
+    .await;
+}
+
+/// [`a_root_is_left_alone_because`] for a root the walk reads, so that its
+/// entry gives no cause.
+async fn a_root_is_left_alone(unmount: impl FnOnce(&Path, &Path)) {
+    a_root_is_left_alone_because(|root, parked| {
+        unmount(root, parked);
+        None
+    })
+    .await;
+}
+
+/// Scans the fixtures, makes the music folder unavailable with `unmount`,
+/// which may move what it holds to the path it is given, and copies a file
+/// into a second root. The rescan reports the music folder once, ending
+/// with the cause `unmount` returns if any, and leaves its tracks as they
+/// were, so that the copy is a new track rather than taking the original's.
+async fn a_root_is_left_alone_because(unmount: impl FnOnce(&Path, &Path) -> Option<String>) {
+    let setup = Setup::new().await;
+    setup.scan().await;
+    let before = setup.tracks().await;
+    let original = &before["Tone FLAC"];
+    let root = fs::canonicalize(setup.music.path()).unwrap();
+
+    let cause = unmount(&root, &setup.dir.path().join("parked"));
+    let backup = TempDir::new().unwrap();
+    let copy = backup.path().join("tone.flac");
+    fs::copy(Path::new(FIXTURES).join("tone.flac"), &copy).unwrap();
+    set_mtime(&copy, 0);
+    setup.library.add_root(backup.path()).await.unwrap();
+
+    let mut message =
+        "the root could not be read or holds no audio files; its 5 files were left as they were"
+            .to_owned();
+    if let Some(cause) = cause {
+        message = format!("{message}: {cause}");
+    }
+    let mut expected = report(1, 0, 0, 0, 0);
+    expected.errors = vec![(root.clone(), message)];
+    assert_eq!(setup.scan().await, expected);
+    for track in before.values() {
+        assert_eq!(setup.missing_since(track).await, None, "{}", track.title);
+    }
+    let source = setup
+        .library
+        .resolve_audio_source(original.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        source,
+        AudioSource::LocalPath(root.join("Album A/02 tone.flac"))
+    );
+    let copies = setup.library.search("Tone FLAC", 10).await.unwrap().tracks;
+    assert_eq!(copies.len(), 2, "{copies:?}");
 }
 
 #[tokio::test]
@@ -553,4 +647,45 @@ async fn roots_do_not_overlap_and_removing_one_removes_its_tracks() {
         setup.library.search("tone", 10).await.unwrap(),
         Default::default()
     );
+}
+
+/// Opens the scan lock file and tries to lock it, as another scan would.
+fn try_lock(path: &Path) -> Result<fs::File, fs::TryLockError> {
+    let file = fs::File::options()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .unwrap();
+    file.try_lock().map(|()| file)
+}
+
+#[tokio::test]
+async fn a_scan_is_refused_while_another_holds_the_lock() {
+    let setup = Setup::new().await;
+    // Standing in for a scan in another process.
+    let other = try_lock(&setup.lock_file()).unwrap();
+
+    let result = setup.library.scan(|_| {}).await;
+    assert!(matches!(result, Err(Error::ScanInProgress)), "{result:?}");
+    assert!(setup.tracks().await.is_empty());
+
+    // Once the other scan has finished, the files are added.
+    drop(other);
+    assert_eq!(setup.scan().await, report(FILES.len(), 0, 0, 0, 0));
+}
+
+#[tokio::test]
+async fn a_scan_releases_its_lock() {
+    let setup = Setup::new().await;
+    setup.scan().await;
+    drop(try_lock(&setup.lock_file()).unwrap());
+
+    // A scan that fails, once it has the lock, releases it too.
+    fs::remove_file(setup.lock_file()).unwrap();
+    setup.library.pool.close().await;
+    let result = setup.library.scan(|_| {}).await;
+    assert!(matches!(result, Err(Error::Database(_))), "{result:?}");
+    assert!(setup.lock_file().exists());
+    drop(try_lock(&setup.lock_file()).unwrap());
 }

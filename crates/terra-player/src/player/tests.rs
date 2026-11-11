@@ -548,3 +548,107 @@ fn status_reports_the_queue_and_the_state() {
     assert_eq!(status.items, [broken]);
     assert_eq!(status.current, None);
 }
+
+#[test]
+fn an_item_inserted_next_between_items_plays_before_the_handed_over_one() {
+    let mut h = Harness::new();
+    let a = h.play("a");
+    let b = h.append("b");
+    h.start(a);
+    h.calls();
+    h.end(a);
+    let c = h.insert_next("c");
+    assert_eq!(h.calls(), [Call::SetNext(Some(c))]);
+    // The engine started b before the replacement arrived.
+    h.start(b);
+    assert_eq!(
+        h.calls(),
+        [Call::Load(c), Call::Play, Call::SetNext(Some(b))]
+    );
+    h.start(c);
+    h.end(c);
+    h.start(b);
+    assert_eq!(
+        h.events(),
+        [started(a), ended(a), started(c), ended(c), started(b)]
+    );
+}
+
+#[test]
+fn an_item_moved_next_between_items_plays_before_the_handed_over_one() {
+    let mut h = Harness::new();
+    let a = h.play("a");
+    let b = h.append("b");
+    let c = h.append("c");
+    h.start(a);
+    h.calls();
+    h.end(a);
+    h.core.command(Command::Move(c, 1));
+    assert_eq!(h.calls(), [Call::SetNext(Some(c))]);
+    h.start(b);
+    assert_eq!(
+        h.calls(),
+        [Call::Load(c), Call::Play, Call::SetNext(Some(b))]
+    );
+    h.start(c);
+    assert_eq!(h.events(), [started(a), ended(a), started(c)]);
+}
+
+#[test]
+fn a_replacement_between_items_that_makes_the_join_plays_first() {
+    let mut h = Harness::new();
+    let a = h.play("a");
+    let b = h.append("b");
+    h.start(a);
+    h.calls();
+    h.end(a);
+    let c = h.insert_next("c");
+    assert_eq!(h.calls(), [Call::SetNext(Some(c))]);
+    // The engine started the replacement, not b.
+    h.start(c);
+    assert_eq!(h.calls(), [Call::SetNext(Some(b))]);
+    assert_eq!(h.events(), [started(a), ended(a), started(c)]);
+    h.end(c);
+    h.start(b);
+    assert_eq!(h.events(), [ended(c), started(b)]);
+}
+
+#[test]
+fn removing_the_handed_over_item_between_items_stops_at_the_end() {
+    let mut h = Harness::new();
+    let a = h.play("a");
+    let b = h.append("b");
+    h.start(a);
+    h.calls();
+    h.end(a);
+    // Whether or not the engine has started b, nothing is left to play.
+    h.core.command(Command::Remove(b));
+    assert_eq!(h.calls(), [Call::SetNext(None), Call::Clear]);
+    assert_eq!(h.events(), [started(a), ended(a), PlayerEvent::Stopped]);
+    h.start(b);
+    assert_eq!(h.events(), []);
+    assert_eq!(h.core.state, PlaybackState::Stopped);
+}
+
+#[test]
+fn an_item_that_cannot_be_opened_inserted_between_items_is_reported_and_skipped() {
+    let mut h = Harness::new();
+    let a = h.play("a");
+    let b = h.append("b");
+    h.start(a);
+    h.calls();
+    h.end(a);
+    let broken = h.insert_next("broken");
+    // The engine must not keep b, and does not move on by itself: the player
+    // loads what follows the broken item.
+    assert_eq!(h.calls(), [Call::SetNext(None), Call::Load(b), Call::Play]);
+    let events = h.events();
+    assert_eq!(events[..2], [started(a), ended(a)]);
+    assert!(matches!(
+        events[2],
+        PlayerEvent::Error { item: Some(item), error: PlayerError::Decode(_) } if item == broken
+    ));
+    assert_eq!(events.len(), 3);
+    h.start(b);
+    assert_eq!(h.events(), [started(b)]);
+}

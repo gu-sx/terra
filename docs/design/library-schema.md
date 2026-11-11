@@ -12,7 +12,7 @@ The scanner (issue #8) adds its algorithm to this document ("Scanning"). Playlis
 
 ## Files and lifecycle
 
-A library is a directory holding the SQLite database `library.db`. `terra-storage`'s `LocalLibrary` owns it:
+A library is a directory holding the SQLite database `library.db`, and `scan.lock` once a scan has run ("One scan at a time" below). `terra-storage`'s `LocalLibrary` owns it, and keeps the directory it was created or opened with:
 
 - `LocalLibrary::create(dir)` creates `dir` if needed and `dir/library.db`, and applies every migration. It refuses a directory that already has a `library.db`.
 - `LocalLibrary::migrate(dir)` applies the migrations the database lacks.
@@ -68,12 +68,13 @@ The scanner, `crates/terra-storage/src/scan/`, keeps the library in step with th
 
 ### The algorithm
 
-`LocalLibrary::scan(progress)` returns a `ScanReport { added, updated, moved, missing, unchanged, errors }`. Each file the walk found counts once, in `added`, `updated`, `moved`, `unchanged` or `errors`; `missing` counts the known files the walk did not find. After each file it calls `progress` with a `ScanProgress { done, total, path }`. A file only counts as moved once the whole walk is done, so that a copy is never mistaken for a move:
+`LocalLibrary::scan(progress)` returns a `ScanReport { added, updated, moved, missing, unchanged, errors }`. Each file the walk found counts once, in `added`, `updated`, `moved`, `unchanged` or `errors`; `missing` counts the known files the walk did not find, except those it leaves as they were (step 1). After each file it calls `progress` with a `ScanProgress { done, total, path }`. A file only counts as moved once the whole walk is done, so that a copy is never mistaken for a move:
 
 1. Walk every root to the end, without following symbolic links and skipping hidden files and folders (whose name starts with `.`; a root's own name does not count). Keep the regular files whose extension is `mp3`, `flac`, `ogg`, `opus`, `m4a` or `wav`, ignoring ASCII case, with their size and modification time. A path that is not valid UTF-8, or that the walk cannot read, is an error and is not seen.
+   A root is **unavailable** when the walk cannot read the root itself (it is gone, cannot be listed or is not a directory), or finds no audio file under it while the root has at least one known file whose `missing_since` is NULL, such as an unmounted drive's empty mount point. The scan leaves the known files of an unavailable root as they were, and those at or under any other path the walk could not read, such as a folder it could not list: they are not candidates in step 4, not marked missing in step 5 and not counted in any `ScanReport` field. `errors` gets one entry per unavailable root, `(root path, "the root could not be read or holds no audio files; its <n> files were left as they were")`, where `<n>` counts every known file of the root, instead of the walk's own error for the root; the error for a path below a root is the walk's. When the walk could not read the root itself, the message ends with the cause, `"…; its <n> files were left as they were: <cause>"`: the I/O error reading the root, without the path the entry names already, such as `No such file or directory (os error 2)`, or `not a directory` (the `Display` of `std::io::ErrorKind::NotADirectory`) for a root that is not one. A root the walk read but found no audio file under gets the message without a cause.
 2. A file whose (`root`, `rel_path`) is known and whose size and modification time are unchanged is unchanged. It is not read. If it was missing, `missing_since` is cleared and it counts as updated.
 3. A known path whose size or modification time changed is read and hashed (BLAKE3 over the whole file, stored in `media_file.content_hash`, which is indexed) and is the same track: its fields are updated in place, and `missing_since` is cleared.
-4. Only after the walk, the known files the walk did not see, and those already missing, are the candidates for a move. Each unknown path is read and hashed, in (`root`, `rel_path`) order with the roots ordered by path:
+4. Only after the walk, the known files the walk did not see, and those already missing, are the candidates for a move, except those step 1 leaves as they were. Each unknown path is read and hashed, in (`root`, `rel_path`) order with the roots ordered by path:
    - If its hash equals a candidate's, it is that file moved: the file row takes the new path, the track keeps its ID and is updated from the tags, `missing_since` is cleared and the candidate is used up. When several unknown paths share a candidate's hash, the first in that order takes it; when several candidates share a hash, the one stored first is taken.
    - Anything else is a new track.
 5. The candidates left are missing. Those without `missing_since` get the scan's time; those that already have it keep it. Their tracks, playlist entries and plays stay; the field is cleared if the file comes back. `resolve_audio_source` refuses a missing file (below).
@@ -83,6 +84,12 @@ So a copy whose original is still in place is a new track, whichever of the two 
 Each file is written in one transaction: its artist and album (found or added), its track, its `media_file` row and its search rows. A file that cannot be read, such as one that is not audio, is recorded in `errors` with the reason, and the scan goes on; so is a panic while reading it. A database failure ends the scan with an error; what was written before stays.
 
 The content, not the extension, decides how a file is read: Lofty guesses the format from the file's first bytes. The scanner reads MPEG audio, FLAC, Ogg Vorbis, Opus, MP4 and WAV (PCM and floating point), and reports any other format, or a file without an audio stream, as an error.
+
+### One scan at a time
+
+Two scans of one library, such as two `terra scan` processes or the CLI next to the TUI, would each add the same new path, and one of them would fail on the unique (`root_id`, `rel_path`). So `scan` first takes an exclusive lock on `scan.lock` in the library's directory, creating the file if it is missing, with `std::fs::File::try_lock`. If another scan holds the lock, in this process or another, `scan` returns `Error::ScanInProgress` at once, before it reads the database or a folder; any other failure to open or lock the file is `Error::Io`. The scan holds the lock until it returns, on every path, whether it succeeds, fails or is dropped. The operating system releases the lock when the process ends, so a crashed scan leaves no stale lock; the file it leaves is harmless and is reused.
+
+Only `scan` takes the lock. Reading the library, `add_root` and `remove_root` do not wait for it.
 
 ### Tags and properties
 
@@ -102,9 +109,9 @@ An artist or album that a scan, or `remove_root`, leaves without tracks is delet
 
 - The hash covers the whole file, tags included, so a file that is both moved and retagged between two scans looks like a new track, and the old one is reported missing.
 - A file changed without changing its size or modification time, within the file system's clock resolution, looks unchanged.
-- A root that cannot be walked, such as an unmounted drive, reports an error, and its files are marked missing until it is back.
+- A root that cannot be read, or holds no audio file while some of its tracks are present, is left as it was (step 1), so that an unmounted drive's tracks are neither marked missing nor taken over by a backup copy under another root. The trade-off: a root emptied on purpose keeps its tracks, which never go missing; `remove_root` removes them. A root that still holds an audio file is walked as usual, so one whose other files were deleted marks them missing. A file moved out of a folder the walk cannot read is a new track at its new path, and the old one stays.
 - Lofty 0.25.5 does not subtract an MP3's encoder delay and padding (the LAME header's gapless fields) or an AAC file's priming samples, so their durations run long by up to about two frames: 32 ms for the 48 kHz MP3 fixture and 21 ms for the 48 kHz AAC one.
-- Nothing stops two scans of the same library from running at once; a path both add fails in one of them.
+- Only `scan` takes the scan lock, so `remove_root` can run during a scan of the same library; the scan then fails with a database error when it writes a file under the removed root.
 
 ## Metadata precedence
 

@@ -600,9 +600,11 @@ impl<E: Engine> Core<E> {
     }
 
     /// Hands the engine the item that follows the current one, when it has
-    /// changed.
+    /// changed. Between items, while the engine moves to the one handed
+    /// over, the cursor still stands on the item that ended.
     fn sync_next(&mut self) {
-        if self.current.is_none() {
+        let between = self.current.is_none();
+        if between && self.next.is_none() {
             return;
         }
         let want = self.queue.peek_next();
@@ -625,6 +627,11 @@ impl<E: Engine> Core<E> {
                 self.next = None;
                 self.next_failed = want;
             }
+        }
+        if between && self.next.is_none() {
+            // The engine has nothing to move to by itself: move on as if the
+            // item had ended with nothing handed over.
+            self.advance();
         }
     }
 }

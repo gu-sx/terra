@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use rodio::buffer::SamplesBuffer;
 use rodio::mixer::mixer;
 
-use super::{Deck, Format, Track};
+use super::{Converted, Deck, Format, Track};
 use crate::QueueItemId;
 use crate::engine::{EngineEvent, EventSink};
 
@@ -106,4 +106,103 @@ fn output_in_the_mixers_format_passes_through_unchanged() {
     let y = through_mixer(vec![sine(48_000, 0, 24_017), sine(48_000, 24_017, 48_000)]);
     assert_eq!(y.len(), 48_000);
     assert!(deviation(&y, 0..y.len(), 0.0) < 1e-6);
+}
+
+/// Two 1 s items at `rate`, played on a 48 kHz output, keep their length,
+/// and the second starts where the first ends.
+fn upsampled_items_keep_their_length(rate: u32) {
+    let y = through_mixer(vec![sine(rate, 0, rate), sine(rate, rate, 2 * rate)]);
+    assert!((y.len() as i64 - 96_000).abs() <= 1, "length {}", y.len());
+    // Linear interpolation of this tone from 8 kHz strays from it by 0.035,
+    // from 22.05 kHz by 0.005; one sample off at the join strays by 0.065.
+    // The first item ends holding its last frame for the few samples the
+    // converter leaves out, so the check before the join stops short of
+    // them.
+    let tolerance = if rate == 8_000 { 0.045 } else { 0.01 };
+    let before = deviation(&y, 48..48_000 - 8, 0.0);
+    assert!(before < tolerance, "before the join: {before}");
+    let after = (-100..=100)
+        .map(|d| deviation(&y, 48_000 + 2..y.len() - 48, f64::from(d) / 100.0))
+        .fold(f64::MAX, f64::min);
+    assert!(
+        after < tolerance,
+        "after the join, at the best delay within ±1 sample: {after}"
+    );
+}
+
+#[test]
+fn items_upsampled_from_8_khz_keep_their_length() {
+    upsampled_items_keep_their_length(8_000);
+}
+
+#[test]
+fn items_upsampled_from_22_05_khz_keep_their_length() {
+    upsampled_items_keep_their_length(22_050);
+}
+
+#[test]
+fn a_converted_item_ends_at_its_exact_length() {
+    let stereo = Format {
+        channels: NonZero::new(2).unwrap(),
+        rate: NonZero::new(48_000).unwrap(),
+    };
+    // Rodio's converter alone ends the 8 kHz item 5 frames short and the
+    // 22.05 kHz one 1 frame short, and the last two 1 frame long.
+    for (rate, frames) in [
+        (8_000, 8_001),
+        (22_050, 22_049),
+        (44_100, 44_117),
+        (48_000, 4_801),
+        (96_000, 96_001),
+        (88_200, 88_210),
+        (192_000, 192_001),
+    ] {
+        let converted = Converted::new(Box::new(sine(rate, 0, frames)), stereo);
+        let expected = (f64::from(frames) * 48_000.0 / f64::from(rate)).round() as usize;
+        assert_eq!(
+            converted.count(),
+            2 * expected,
+            "{frames} frames at {rate} Hz"
+        );
+    }
+}
+
+/// The length, in samples, that `frames` mono frames at `rate` convert to.
+fn converted_length(rate: u32, frames: u32, to: Format) -> usize {
+    let frames = (f64::from(frames) * f64::from(to.rate.get()) / f64::from(rate)).round();
+    frames as usize * usize::from(to.channels.get())
+}
+
+#[test]
+fn a_converted_item_ends_before_a_frame_the_converter_makes_from_its_last_frames() {
+    // Rodio's converter makes output frame 44 100 from input frames 192 000
+    // and 192 001, the last two, before the item shows its end.
+    let mono = Format {
+        channels: NonZero::new(1).unwrap(),
+        rate: NonZero::new(44_100).unwrap(),
+    };
+    let converted = Converted::new(Box::new(sine(192_000, 0, 192_002)), mono);
+    assert_eq!(converted.count(), 44_100);
+}
+
+#[test]
+fn every_item_length_converts_to_its_exact_length() {
+    // The converters repeat every 640 input frames at most, the period of
+    // 192 kHz to 44.1 kHz.
+    for (channels, rate) in [(1, 44_100), (2, 48_000)] {
+        let to = Format {
+            channels: NonZero::new(channels).unwrap(),
+            rate: NonZero::new(rate).unwrap(),
+        };
+        for rate in [8_000, 22_050, 44_100, 48_000, 88_200, 96_000, 192_000] {
+            for frames in 0..=700 {
+                let converted = Converted::new(Box::new(sine(rate, 0, frames)), to);
+                assert_eq!(
+                    converted.count(),
+                    converted_length(rate, frames, to),
+                    "{frames} frames at {rate} Hz to {to:?}"
+                );
+            }
+        }
+    }
 }
