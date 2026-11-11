@@ -163,14 +163,12 @@ async fn event_loop<B: LibraryBackend>(
     }
 }
 
-/// What the TUI returns once the user has quit: the error of an edit that
-/// failed while it waited for the edits, so that it is reported after the
-/// terminal is restored.
+/// What the TUI returns once the user has quit: the error of an edit or a
+/// play that failed while it waited for them, so that it is reported after
+/// the terminal is restored.
 fn exit(app: &App) -> io::Result<()> {
     match &app.quit_error {
-        Some(error) => Err(io::Error::other(format!(
-            "playlist changes not saved: {error}"
-        ))),
+        Some(error) => Err(io::Error::other(error.clone())),
         None => Ok(()),
     }
 }

@@ -537,6 +537,7 @@ impl App {
             return Vec::new();
         }
         *recorded = true;
+        self.recording += 1;
         vec![Request::RecordPlay {
             track: track.clone(),
             device: self.device.clone(),

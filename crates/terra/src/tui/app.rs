@@ -374,13 +374,15 @@ pub struct App {
     pub now: NowPlaying,
     /// The playback jobs not yet done, in order. The first is running.
     pub(super) jobs: VecDeque<Job>,
+    /// How many plays are being recorded. Quitting waits for them.
+    pub(super) recording: usize,
     /// The queue view, while it is open.
     pub queue_view: Option<QueueView>,
     /// Whether the TUI waits for the outstanding edits to quit.
     pub quitting: bool,
     pub quit: bool,
-    /// The error of an edit that failed while quitting, which the TUI
-    /// returns.
+    /// The error of an edit or a play that failed while quitting, which the
+    /// TUI returns.
     pub(super) quit_error: Option<String>,
     /// How many rows of the main list fit on the terminal.
     pub list_height: usize,
@@ -417,6 +419,7 @@ impl App {
             device: device.into(),
             now: NowPlaying::new(),
             jobs: VecDeque::new(),
+            recording: 0,
             queue_view: None,
             quitting: false,
             quit: false,
@@ -925,12 +928,15 @@ fn store(app: &mut App, response: Response) -> Vec<Request> {
         Request::Edit(edit) => return app.finish_edit(&edit, result),
         Request::Resolve { job, tracks } => return app.finish_resolve(job, tracks, result),
         Request::RecordPlay { track, .. } => {
+            app.recording = app.recording.saturating_sub(1);
             if let Err(error) = result {
-                app.status = Some(Status {
-                    text: format!("Could not record the play of “{}”: {error}", track.title),
-                    error: true,
-                });
+                let text = format!("Could not record the play of “{}”: {error}", track.title);
+                if app.quitting {
+                    app.quit_error = Some(text.clone());
+                }
+                app.status = Some(Status { text, error: true });
             }
+            app.quit_when_saved();
         }
     }
     Vec::new()

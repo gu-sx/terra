@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use terra_core::testing::{MemoryLibrary, block_on};
 use terra_core::{ArtistRef, AudioSource, LibraryBackend, Track, TrackId};
 use terra_player::{
@@ -657,4 +657,66 @@ fn a_missing_file_shows_the_error_and_the_queue_moves_on() {
     let expected = format!("Cannot play “Missing”: cannot decode {}", missing.display());
     assert!(status.text.starts_with(&expected), "{}", status.text);
     row_of(&screen, "Cannot play “Missing”");
+}
+
+/// "Demo Tape" playing past its threshold, with the request that records
+/// its play returned unanswered.
+fn recording_demo_tape() -> (Harness, Request) {
+    let mut harness = Harness::sample();
+    harness.select("Demo Tape");
+    harness.press(KeyCode::Enter);
+    let item = harness.current();
+    harness.hear(PlayerEvent::TrackStarted { item });
+    let requests = player_event(
+        &mut harness.app,
+        PlayerEvent::Position {
+            item,
+            elapsed: Duration::from_secs(120),
+            total: None,
+        },
+    );
+    let [record] = <[Request; 1]>::try_from(requests).unwrap();
+    assert!(matches!(record, Request::RecordPlay { .. }));
+    (harness, record)
+}
+
+#[test]
+fn quit_waits_for_a_play_being_recorded() {
+    let (mut harness, record) = recording_demo_tape();
+    harness.type_text("Q");
+    harness.key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(!harness.app.quit);
+    // The queue view closes, so that `q` quits.
+    assert!(harness.app.queue_view.is_none());
+    row_of(
+        &harness.screen(),
+        "Saving the play history… (q again to quit now)",
+    );
+    harness.answer(vec![record]);
+    assert!(harness.app.quit);
+    assert!(super::super::exit(&harness.app).is_ok());
+    assert_eq!(
+        harness.plays(),
+        [("Demo Tape".to_owned(), DEVICE.to_owned())]
+    );
+}
+
+#[test]
+fn a_play_that_fails_to_record_while_quitting_is_reported() {
+    let (mut harness, record) = recording_demo_tape();
+    harness.type_text("q");
+    assert!(!harness.app.quit);
+    receive(
+        &mut harness.app,
+        Response {
+            request: record,
+            result: Err("library storage failed".to_owned()),
+        },
+    );
+    assert!(harness.app.quit);
+    let error = super::super::exit(&harness.app).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Could not record the play of “Demo Tape”: library storage failed"
+    );
 }
