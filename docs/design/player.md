@@ -17,10 +17,9 @@ The cursor is either **on** an item, the current one, or **between** items, with
 | `remove` | Removes an item. Removing the current item leaves the cursor where it was, so `next` moves to the item that followed it. |
 | `move_to(item, index)` | Moves an item so it ends up at `index`, or at the end for a larger index. The current item stays current. |
 | `clear` | Removes every item. Repeat is kept. |
+| `shuffle` | Puts the items still to come in a random order, once: the items after the current one, or with no current item those `next` moves through, which before the first item and past the end is every item. The cursor and the items before it stay, and each item keeps its id. There is no shuffle mode: the new order is the play order, repeat plays it as it is, and the old order is not kept. |
 | `next` | Moves to the next item. At the end: with repeat off, returns nothing and leaves the queue past its end with no current item; with repeat all, moves to the first item. |
 | `previous` | Moves to the previous item. At the first item: with repeat off, returns nothing and stays; with repeat all, moves to the last item. Past the end, moves to the last item. |
-
-Shuffle comes later; #7 leaves it out.
 
 ## Player
 
@@ -31,7 +30,7 @@ Each command returns once the player has applied it; the engine follows within a
 | Command | Effect |
 | --- | --- |
 | `play(source)` | Replaces the queue with `source` and plays it. To play a list, `play` its first track and `append` the rest. |
-| `append`, `insert_next`, `remove`, `move_to`, `clear`, `set_repeat` | As on the queue. `clear` also stops. Removing the item that plays moves on to the item that followed it, as if it had ended. |
+| `append`, `insert_next`, `remove`, `move_to`, `clear`, `shuffle`, `set_repeat` | As on the queue. `clear` also stops. Removing the item that plays moves on to the item that followed it, as if it had ended. |
 | `pause`, `resume`, `toggle` | `resume` after `stop` plays the current item from its start, or the next item when there is none. |
 | `stop` | Stops playback. The queue and its current item stay. |
 | `seek(position)` | Seeks within the current item. |
