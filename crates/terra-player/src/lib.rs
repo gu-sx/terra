@@ -20,5 +20,5 @@ mod player;
 mod queue;
 
 pub use error::PlayerError;
-pub use player::{Capture, Output, Player, PlayerEvent};
+pub use player::{Capture, Output, PlaybackState, Player, PlayerEvent, PlayerStatus};
 pub use queue::{Queue, QueueItemId, Repeat};

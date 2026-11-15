@@ -201,3 +201,20 @@ fn every_handle_controls_the_same_player_until_the_last_is_dropped() {
     // The player's thread ends and closes its event channel.
     assert!(events.recv_timeout(Duration::from_secs(5)).is_err());
 }
+
+#[test]
+fn status_follows_the_queue_through_the_player_thread() {
+    let (player, events, mut capture) = capture();
+    let a = player.play(fixture("a.flac")).unwrap();
+    let b = player.append(fixture("b.flac")).unwrap();
+    let status = player.status().unwrap();
+    assert_eq!(status.items, [a, b]);
+    assert_eq!(status.current, Some(a));
+    assert_eq!(status.state, terra_player::PlaybackState::Playing);
+
+    let mut seen = Vec::new();
+    pull_until(&player, &mut capture, &events, &mut seen, |seen| {
+        seen.contains(&PlayerEvent::TrackStarted { item: b })
+    });
+    assert_eq!(player.status().unwrap().current, Some(b));
+}

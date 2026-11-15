@@ -9,8 +9,9 @@
 //! and once the last edit is done the playlists and every open playlist load
 //! again.
 //!
-//! Quitting while edits are outstanding waits for them: the TUI quits once
-//! the last is done or one fails, or when quit is pressed again.
+//! Quitting while edits or plays being recorded are outstanding waits for
+//! them: the TUI quits once the last is done or an edit fails, or when quit
+//! is pressed again.
 
 use terra_core::{Playlist, PlaylistEntryId, PlaylistId, Track};
 
@@ -74,10 +75,6 @@ pub enum Edit {
 
 fn info(text: String) -> Option<Status> {
     Some(Status { text, error: false })
-}
-
-fn saving() -> Option<Status> {
-    info("Saving playlist changes… (q again to quit now)".to_owned())
 }
 
 impl App {
@@ -246,17 +243,41 @@ impl App {
         })
     }
 
-    /// Quits at once when no edit is outstanding or when already waiting for
-    /// them, and otherwise waits for them. The prompt and the search being
-    /// typed close, so that the status shows and `q` quits.
+    /// Whether an edit or a play being recorded is outstanding.
+    fn saving_anything(&self) -> bool {
+        !self.edits.is_empty() || self.recording > 0
+    }
+
+    /// The status while quitting waits.
+    pub(super) fn saving(&self) -> Option<Status> {
+        let what = if self.edits.is_empty() {
+            "the play history"
+        } else {
+            "playlist changes"
+        };
+        info(format!("Saving {what}… (q again to quit now)"))
+    }
+
+    /// Quits once quitting has waited for everything outstanding.
+    pub(super) fn quit_when_saved(&mut self) {
+        if self.quitting && !self.saving_anything() {
+            self.quit = true;
+        }
+    }
+
+    /// Quits at once when no edit or play is outstanding or when already
+    /// waiting for them, and otherwise waits for them. The prompt, the
+    /// queue view and the search being typed close, so that the status
+    /// shows and `q` quits.
     pub(super) fn quit_after_edits(&mut self) {
-        if self.edits.is_empty() || self.quitting {
+        if !self.saving_anything() || self.quitting {
             self.quit = true;
             return;
         }
         self.quitting = true;
         self.modal = None;
         self.help = false;
+        self.queue_view = None;
         self.held.clear();
         if self
             .top()
@@ -266,7 +287,7 @@ impl App {
         {
             self.confirm_search();
         }
-        self.status = saving();
+        self.status = self.saving();
     }
 
     /// Queues an edit, and starts it unless another is running.
@@ -341,7 +362,7 @@ impl App {
             }
             Err(error) => {
                 if self.quitting {
-                    self.quit_error = Some(error.clone());
+                    self.quit_error = Some(format!("playlist changes not saved: {error}"));
                 }
                 self.status = Some(Status {
                     text: error,
@@ -358,11 +379,11 @@ impl App {
             }
         }
         if self.quitting {
+            self.quit_when_saved();
             if self.edits.is_empty() {
-                self.quit = true;
                 return Vec::new();
             }
-            self.status = saving();
+            self.status = self.saving();
         }
         match self.edits.front() {
             Some(next) => requests.push(Request::Edit(next.clone())),

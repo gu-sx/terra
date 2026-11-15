@@ -42,6 +42,25 @@ pub enum PlayerEvent {
     },
 }
 
+/// Whether a player plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackState {
+    Stopped,
+    Playing,
+    Paused,
+}
+
+/// What a player holds and does, as [`Player::status`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerStatus {
+    pub state: PlaybackState,
+    /// The queue's items, in order.
+    pub items: Vec<QueueItemId>,
+    /// The queue's current item, if it has one: the item that plays, or
+    /// that a pause or a stop left current.
+    pub current: Option<QueueItemId>,
+}
+
 /// Where a player sends its audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -74,6 +93,7 @@ impl Drop for Handle {
 
 enum Message {
     Command(Command, SyncSender<()>),
+    Status(SyncSender<PlayerStatus>),
     Engine(EngineEvent),
     Shutdown,
 }
@@ -244,6 +264,17 @@ impl Player {
         self.send(Command::Previous)
     }
 
+    /// The queue and the play state, as they are once the commands sent
+    /// before have been applied.
+    pub fn status(&self) -> Result<PlayerStatus, PlayerError> {
+        let (reply, status) = mpsc::sync_channel(1);
+        self.handle
+            .messages
+            .send(Message::Status(reply))
+            .map_err(|_| PlayerError::Closed)?;
+        status.recv().map_err(|_| PlayerError::Closed)
+    }
+
     fn send(&self, command: Command) -> Result<(), PlayerError> {
         let (done, applied) = mpsc::sync_channel(1);
         self.handle
@@ -289,13 +320,6 @@ where
     Ok((player, outbox))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
-    Stopped,
-    Playing,
-    Paused,
-}
-
 /// The player itself: the queue, the engine and what the engine was told.
 struct Core<E> {
     engine: E,
@@ -303,7 +327,7 @@ struct Core<E> {
     queue: Queue<AudioSource>,
     /// Shuffles the queue.
     rng: fastrand::Rng,
-    state: State,
+    state: PlaybackState,
     /// The item the engine plays.
     current: Option<QueueItemId>,
     /// An item just loaded whose start has not been reported: until it is,
@@ -326,7 +350,7 @@ impl<E: Engine> Core<E> {
             events,
             queue: Queue::new(),
             rng: fastrand::Rng::new(),
-            state: State::Stopped,
+            state: PlaybackState::Stopped,
             current: None,
             loading: None,
             next: None,
@@ -342,9 +366,20 @@ impl<E: Engine> Core<E> {
                     self.command(command);
                     let _ = done.send(());
                 }
+                Message::Status(reply) => {
+                    let _ = reply.send(self.status());
+                }
                 Message::Engine(event) => self.engine_event(event),
                 Message::Shutdown => break,
             }
+        }
+    }
+
+    fn status(&self) -> PlayerStatus {
+        PlayerStatus {
+            state: self.state,
+            items: self.queue.iter().map(|(item, _)| item).collect(),
+            current: self.queue.current_id(),
         }
     }
 
@@ -358,7 +393,7 @@ impl<E: Engine> Core<E> {
                 self.queue.clear();
                 self.queue.push(item, source);
                 self.queue.select(item);
-                self.state = State::Playing;
+                self.state = PlaybackState::Playing;
                 self.start_current();
             }
             Command::Append(item, source) => {
@@ -374,7 +409,7 @@ impl<E: Engine> Core<E> {
                 if self.queue.remove(item).is_none() {
                     return;
                 }
-                if was_current && self.state != State::Stopped {
+                if was_current && self.state != PlaybackState::Stopped {
                     self.advance();
                 } else {
                     self.sync_next();
@@ -399,8 +434,8 @@ impl<E: Engine> Core<E> {
             Command::Pause => self.pause(),
             Command::Resume => self.resume(),
             Command::Toggle => match self.state {
-                State::Playing => self.pause(),
-                State::Paused | State::Stopped => self.resume(),
+                PlaybackState::Playing => self.pause(),
+                PlaybackState::Paused | PlaybackState::Stopped => self.resume(),
             },
             Command::Stop => self.stop(),
             Command::Seek(position) => {
@@ -414,7 +449,7 @@ impl<E: Engine> Core<E> {
                 }
             }
             Command::Next => {
-                if self.state == State::Stopped {
+                if self.state == PlaybackState::Stopped {
                     self.queue.next();
                 } else {
                     self.advance();
@@ -422,7 +457,7 @@ impl<E: Engine> Core<E> {
             }
             Command::Previous => {
                 self.queue.previous();
-                if self.state != State::Stopped {
+                if self.state != PlaybackState::Stopped {
                     self.start_current();
                 }
             }
@@ -489,25 +524,25 @@ impl<E: Engine> Core<E> {
     }
 
     fn pause(&mut self) {
-        if self.state == State::Playing {
+        if self.state == PlaybackState::Playing {
             self.engine.pause();
-            self.state = State::Paused;
+            self.state = PlaybackState::Paused;
         }
     }
 
     fn resume(&mut self) {
         match self.state {
-            State::Playing => {}
-            State::Paused => {
+            PlaybackState::Playing => {}
+            PlaybackState::Paused => {
                 self.engine.play();
-                self.state = State::Playing;
+                self.state = PlaybackState::Playing;
             }
-            State::Stopped => {
+            PlaybackState::Stopped => {
                 if self.queue.current().is_none() {
                     self.queue.next();
                 }
                 if self.queue.current().is_some() {
-                    self.state = State::Playing;
+                    self.state = PlaybackState::Playing;
                     self.start_current();
                 }
             }
@@ -538,10 +573,10 @@ impl<E: Engine> Core<E> {
                     self.next = None;
                     self.next_failed = None;
                     self.replaced.clear();
-                    if self.state == State::Paused {
+                    if self.state == PlaybackState::Paused {
                         self.engine.pause();
                     } else {
-                        self.state = State::Playing;
+                        self.state = PlaybackState::Playing;
                         self.engine.play();
                     }
                     self.sync_next();
@@ -564,7 +599,7 @@ impl<E: Engine> Core<E> {
     fn stop(&mut self) {
         // Also when nothing is known to play: the engine may have started an
         // item handed over and replaced just before it ended the last one.
-        if self.state != State::Stopped || self.current.is_some() || self.next.is_some() {
+        if self.state != PlaybackState::Stopped || self.current.is_some() || self.next.is_some() {
             self.engine.clear();
         }
         self.current = None;
@@ -572,8 +607,8 @@ impl<E: Engine> Core<E> {
         self.next = None;
         self.next_failed = None;
         self.replaced.clear();
-        if self.state != State::Stopped {
-            self.state = State::Stopped;
+        if self.state != PlaybackState::Stopped {
+            self.state = PlaybackState::Stopped;
             self.emit(PlayerEvent::Stopped);
         }
     }

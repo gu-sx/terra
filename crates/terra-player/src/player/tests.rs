@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use terra_core::AudioSource;
 
-use super::{Command, Core, State};
+use super::{Command, Core};
 use crate::engine::{Engine, EngineEvent};
-use crate::{PlayerError, PlayerEvent, QueueItemId, Repeat};
+use crate::{PlaybackState, PlayerError, PlayerEvent, QueueItemId, Repeat};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Call {
@@ -147,7 +147,7 @@ fn play_loads_the_item_and_reports_its_start() {
     assert_eq!(h.events(), []);
     h.start(a);
     assert_eq!(h.events(), [started(a)]);
-    assert_eq!(h.core.state, State::Playing);
+    assert_eq!(h.core.state, PlaybackState::Playing);
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn the_queue_running_out_stops() {
     h.end(a);
     assert_eq!(h.events(), [started(a), ended(a), PlayerEvent::Stopped]);
     assert_eq!(h.calls(), [Call::Clear]);
-    assert_eq!(h.core.state, State::Stopped);
+    assert_eq!(h.core.state, PlaybackState::Stopped);
     assert_eq!(h.core.queue.current_id(), None);
 }
 
@@ -258,7 +258,7 @@ fn removing_the_last_current_item_stops() {
     let a = h.play("a");
     h.start(a);
     h.core.command(Command::Remove(a));
-    assert_eq!(h.core.state, State::Stopped);
+    assert_eq!(h.core.state, PlaybackState::Stopped);
     assert!(h.core.queue.is_empty());
 }
 
@@ -369,7 +369,7 @@ fn next_skips_and_stops_at_the_end_without_repeat() {
     h.start(b);
     h.core.command(Command::Next);
     assert_eq!(h.calls(), [Call::Clear]);
-    assert_eq!(h.core.state, State::Stopped);
+    assert_eq!(h.core.state, PlaybackState::Stopped);
 }
 
 #[test]
@@ -423,9 +423,9 @@ fn pause_resume_and_toggle() {
     h.start(a);
     h.calls();
     h.core.command(Command::Pause);
-    assert_eq!(h.core.state, State::Paused);
+    assert_eq!(h.core.state, PlaybackState::Paused);
     h.core.command(Command::Resume);
-    assert_eq!(h.core.state, State::Playing);
+    assert_eq!(h.core.state, PlaybackState::Playing);
     h.core.command(Command::Toggle);
     h.core.command(Command::Toggle);
     assert_eq!(
@@ -444,7 +444,7 @@ fn skipping_while_paused_stays_paused() {
     h.calls();
     h.core.command(Command::Next);
     assert_eq!(h.calls(), [Call::Load(b), Call::Pause]);
-    assert_eq!(h.core.state, State::Paused);
+    assert_eq!(h.core.state, PlaybackState::Paused);
 }
 
 #[test]
@@ -504,7 +504,7 @@ fn clearing_the_queue_stops() {
     h.core.command(Command::ClearQueue);
     assert_eq!(h.calls(), [Call::Clear]);
     assert!(h.core.queue.is_empty());
-    assert_eq!(h.core.state, State::Stopped);
+    assert_eq!(h.core.state, PlaybackState::Stopped);
 }
 
 #[test]
@@ -539,6 +539,34 @@ fn an_item_dropped_as_the_engine_started_it_stops_at_the_end() {
     h.start(b);
     assert_eq!(h.calls(), [Call::Clear]);
     assert_eq!(h.events(), [started(a), ended(a), PlayerEvent::Stopped]);
+}
+
+#[test]
+fn status_reports_the_queue_and_the_state() {
+    let mut h = Harness::new();
+    let empty = h.core.status();
+    assert_eq!(empty.state, PlaybackState::Stopped);
+    assert_eq!(empty.items, []);
+    assert_eq!(empty.current, None);
+
+    let a = h.play("a");
+    let b = h.append("b");
+    let c = h.insert_next("c");
+    let status = h.core.status();
+    assert_eq!(status.state, PlaybackState::Playing);
+    assert_eq!(status.items, [a, c, b]);
+    assert_eq!(status.current, Some(a));
+
+    h.core.command(Command::Pause);
+    assert_eq!(h.core.status().state, PlaybackState::Paused);
+
+    // A broken item is skipped: the queue moves past it.
+    let mut h = Harness::new();
+    let broken = h.play("broken");
+    let status = h.core.status();
+    assert_eq!(status.state, PlaybackState::Stopped);
+    assert_eq!(status.items, [broken]);
+    assert_eq!(status.current, None);
 }
 
 #[test]
@@ -619,7 +647,7 @@ fn removing_the_handed_over_item_between_items_stops_at_the_end() {
     assert_eq!(h.events(), [started(a), ended(a), PlayerEvent::Stopped]);
     h.start(b);
     assert_eq!(h.events(), []);
-    assert_eq!(h.core.state, State::Stopped);
+    assert_eq!(h.core.state, PlaybackState::Stopped);
 }
 
 #[test]
